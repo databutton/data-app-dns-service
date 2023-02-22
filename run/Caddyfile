@@ -55,6 +55,7 @@
 			trusted_proxies private_ranges
 			header_down -Access-Control-Allow-Origin
 			header_down -Access-Control-Allow-Credentials
+			header_up X-Request-Id {http.request_id}
 		}
 	}
 
@@ -68,19 +69,17 @@
 		# Devx and prodx match
 		handle @devx_or_prodx {
 			uri strip_prefix /{re.svc_name.1}
+			request_header X-Databutton-Service-Type {re.svc_name.1}
+			request_header X-Databutton-Project-Id {re.project_id.1}
 			reverse_proxy {
-				dynamic devx {
-					gcp_project databutton
-					gcp_project_hash gvjcjtpafa
-				}
+				dynamic devx
 				trusted_proxies private_ranges
 				transport http {
 					tls
 				}
 				header_up Host {upstream_hostport}
-				header_up X-Databutton-Project-Id {re.project_id.1}
 				header_up X-Original-Path {vars.originalPath}
-				header_up X-Databutton-Service-Type {re.svc_name.1}
+				header_up X-Request-Id {http.request_id}
 				header_down -Access-Control-Allow-Origin
 				header_down -Access-Control-Allow-Credentials
 
@@ -97,6 +96,7 @@
 				header_up Host {upstream_hostport}
 				header_up X-Databutton-Project-Id {re.project_id.1}
 				header_up X-Original-Path {vars.originalPath}
+				header_up X-Request-Id {http.request_id}
 				header_down -Access-Control-Allow-Origin
 				header_down -Access-Control-Allow-Credentials
 			}
@@ -109,6 +109,7 @@
 				header_up Host {upstream_hostport}
 				header_up X-Databutton-Project-Id {re.project_id.1}
 				header_up X-Original-Path {vars.originalPath}
+				header_up X-Request-Id
 				header_down -Access-Control-Allow-Origin
 				header_down -Access-Control-Allow-Credentials
 			}

@@ -1,0 +1,121 @@
+{
+	order request_id before header
+	debug
+}
+
+(cors) {
+	@origin{args.0} header Origin {args.0}
+	header @origin{args.0} Access-Control-Allow-Origin "{args.0}"
+	header @origin{args.0} Access-Control-Allow-Headers "content-type, x-request-id, authorization, x-dbtn-webapp-version"
+	header @origin{args.0} Vary Origin
+	header @origin{args.0} Access-Control-Allow-Methods "POST, GET, PATCH, PUT, OPTIONS, DELETE"
+	header @origin{args.0} Access-Control-Allow-Credentials "true"
+}
+
+:{$PORT:8080} {
+	log {
+		format json
+	}
+
+	request_id {
+		header 21
+	}
+
+	header * X-Request-Id "{http.request_id.header}"
+
+	# Cors rules
+	import cors https://next.databutton.com
+	import cors https://next.databutton.io
+	import cors http://localhost:3000
+	import cors http://localhost:8080
+
+	# Custom cors for PR-server. Supports Firebase and Vercel previews
+	# TODO: Clean up this, surely there's a way I'm just tired right now.
+	@pr_origin header_regexp pr_origin Origin (https:\/\/next-dbtn--\S+\.web\.app|https:\/\/databutton-\S+-databutton\.vercel\.app)
+
+	header @pr_origin Access-Control-Allow-Origin "{re.pr_origin.1}"
+	header @pr_origin Access-Control-Allow-Headers "content-type, x-request-id, authorization, x-dbtn-webapp-version"
+	header @pr_origin Vary Origin
+	header @pr_origin Access-Control-Allow-Methods "POST, GET, PATCH, PUT, OPTIONS, DELETE"
+	header @pr_origin Access-Control-Allow-Credentials "true"
+
+	# Handle options here
+	@options {
+		method OPTIONS
+	}
+
+	handle @options {
+		respond 204
+	}
+
+	# This is regular auth calls, like login/success
+	handle_path /_auth/* {
+		reverse_proxy {$AUTH_SERVICE_URL} {
+			header_up Host {upstream_hostport}
+			trusted_proxies private_ranges
+			header_down -Access-Control-Allow-Origin
+			header_down -Access-Control-Allow-Credentials
+		}
+	}
+
+	@pid path_regexp project_id ^\/_projects\/([a-zA-Z0-9-_]+)\/dbtn.*
+	# Handle the api paths
+	handle @pid {
+		vars originalPath {path}
+		uri strip_prefix /_projects/{re.project_id.1}/dbtn
+		@devx_or_prodx path_regexp svc_name ^\/(devx|prodx)\/.*$
+
+		# Devx and prodx match
+		handle @devx_or_prodx {
+			uri strip_prefix /{re.svc_name.1}
+			reverse_proxy {
+				dynamic devx {
+					gcp_project databutton
+					gcp_project_hash gvjcjtpafa
+				}
+				trusted_proxies private_ranges
+				transport http {
+					tls
+				}
+				header_up Host {upstream_hostport}
+				header_up X-Databutton-Project-Id {re.project_id.1}
+				header_up X-Original-Path {vars.originalPath}
+				header_up X-Databutton-Service-Type {re.svc_name.1}
+				header_down -Access-Control-Allow-Origin
+				header_down -Access-Control-Allow-Credentials
+
+				lb_retries 3
+				lb_try_duration 30s
+			}
+		}
+
+		@dbapi_package_installer path_regexp ^\/hooks\/requirements\/install.*$
+
+		handle @dbapi_package_installer {
+			reverse_proxy https://dbapi-package-installer-gvjcjtpafa-ew.a.run.app {
+				trusted_proxies private_ranges
+				header_up Host {upstream_hostport}
+				header_up X-Databutton-Project-Id {re.project_id.1}
+				header_up X-Original-Path {vars.originalPath}
+				header_down -Access-Control-Allow-Origin
+				header_down -Access-Control-Allow-Credentials
+			}
+		}
+
+		handle * {
+			# This would be dbapi, then
+			reverse_proxy https://databutton-api-gvjcjtpafa-ew.a.run.app {
+				trusted_proxies private_ranges
+				header_up Host {upstream_hostport}
+				header_up X-Databutton-Project-Id {re.project_id.1}
+				header_up X-Original-Path {vars.originalPath}
+				header_down -Access-Control-Allow-Origin
+				header_down -Access-Control-Allow-Credentials
+			}
+		}
+	}
+
+	handle {
+		respond "Nope, this is probably not the URL you wanted to hit!" 404
+	}
+}

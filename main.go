@@ -11,6 +11,8 @@ import (
 
 	"cloud.google.com/go/firestore"
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
+	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
@@ -32,6 +34,8 @@ func (DevxUpstreams) CaddyModule() caddy.ModuleInfo {
 
 func init() {
 	caddy.RegisterModule(DevxUpstreams{})
+	httpcaddyfile.RegisterHandlerDirective("devx_upstreams", parseCaddyfileHandler)
+
 }
 
 type Project struct {
@@ -129,8 +133,22 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	return nil, errors.New("missing x-databutton-project-id header")
 }
 
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
+func (d *DevxUpstreams) UnmarshalCaddyfile(disp *caddyfile.Dispenser) error {
+	for disp.Next() {
+		if !disp.Args(&d.GCP_PROJECT) {
+			return disp.ArgErr()
+		}
+		if !disp.Args(&d.GCP_PROJECT_HASH) {
+			return disp.ArgErr()
+		}
+	}
+	return nil
+}
+
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*DevxUpstreams)(nil)
 	_ reverseproxy.UpstreamSource = (*DevxUpstreams)(nil)
+	_ caddyfile.Unmarshaler       = (*DevxUpstreams)(nil)
 )

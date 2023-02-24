@@ -14,6 +14,8 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"go.uber.org/zap"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type CloudRunServices struct {
@@ -50,7 +52,6 @@ func init() {
 
 // TODO: Update this to also delete stuff projects.
 func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, wg *sync.WaitGroup, initial bool) error {
-	// projectID := "project-id"
 	bg := context.Background()
 
 	// TODO: Put projectId (databutton) as an envvar or some other config.
@@ -65,6 +66,10 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 	for {
 		snap, err := it.Next()
 		if err != nil {
+			if status.Code(err) == codes.Canceled {
+				d.logger.Info("Shutting down gracefully, I've been cancelled.")
+				return nil
+			}
 			d.logger.Error("Snapshots.Next err", zap.Error(err))
 			panic(err)
 		}

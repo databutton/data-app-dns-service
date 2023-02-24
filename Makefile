@@ -1,7 +1,4 @@
-.PHONY: test
-
-
-DATE = $(shell date -u +%F-%H-%M-%S)
+.PHONY: build
 
 
 build:  ## build a custom caddy instance

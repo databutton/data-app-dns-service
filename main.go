@@ -14,19 +14,20 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"go.uber.org/zap"
 	"google.golang.org/api/iterator"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
+type CloudRunServices struct {
+	devx  string
+	prodx string
+}
 type Project struct {
-	ProjectID string `firestore:"projectId"`
-	Region    string `firestore:"region"`
-	DevxURL   string `firestore:"devxUrl"`
+	ProjectID string           `firestore:"projectId"`
+	Region    string           `firestore:"region"`
+	cloudRun  CloudRunServices `firestore:"cloudRunServices"`
+	DevxURL   string           `firestore:"devxUrl"`
 }
 
 type DevxUpstreams struct {
-	// GCP_PROJECT      string `json:"gcp_project,omitempty"`
-	// GCP_PROJECT_HASH string `json:"gcp_project_hash,omitempty"`
 	projectMap map[string]Project
 	logger     *zap.Logger
 }
@@ -54,11 +55,9 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 
 	// TODO: Put projectId (databutton) as an envvar or some other config.
 	client, err := firestore.NewClient(bg, GCP_PROJECT)
-	if status.Code(err) == codes.DeadlineExceeded {
-		return nil
-	}
 	if err != nil {
-		return fmt.Errorf("firestore.NewClient: %v", err)
+		d.logger.Error("Could not create firestore client", zap.Error(err))
+		panic(err)
 	}
 	defer client.Close()
 
@@ -66,8 +65,8 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 	for {
 		snap, err := it.Next()
 		if err != nil {
-			d.logger.Sugar().With("Snapshots.Next err", err)
-			return fmt.Errorf("Snapshots.Next: %v", err)
+			d.logger.Error("Snapshots.Next err", zap.Error(err))
+			panic(err)
 		}
 		if snap != nil {
 			for {
@@ -82,8 +81,8 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 					break
 				}
 				if err != nil {
-					d.logger.Error("Documents.Next err")
-					return fmt.Errorf("Documents.Next: %v", err)
+					d.logger.Error("Documents.Next err", zap.Error(err))
+					panic(err)
 				}
 				var projectData Project
 				doc.DataTo(&projectData)

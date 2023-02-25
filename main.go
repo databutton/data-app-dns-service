@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"time"
 
 	"sync"
 
@@ -12,21 +14,25 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
+	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
+
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-type CloudRunServices struct {
-	devx  string
-	prodx string
+type CloudRunService struct {
+	name   string
+	region string
+	url    string
 }
 type Project struct {
-	ProjectID string           `firestore:"projectId"`
-	Region    string           `firestore:"region"`
-	cloudRun  CloudRunServices `firestore:"cloudRunServices"`
-	DevxURL   string           `firestore:"devxUrl"`
+	ProjectID string          `firestore:"projectId"`
+	Region    string          `firestore:"region"`
+	devx      CloudRunService `firestore:"devx"`
+	prodx     CloudRunService `firestore:"prodx"`
+	DevxURL   string          `firestore:"devxUrl"`
 }
 
 type DevxUpstreams struct {
@@ -57,7 +63,7 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 	// TODO: Put projectId (databutton) as an envvar or some other config.
 	client, err := firestore.NewClient(bg, GCP_PROJECT)
 	if err != nil {
-		d.logger.Error("Could not create firestore client", zap.Error(err))
+		sentry.CaptureException(err)
 		panic(err)
 	}
 	defer client.Close()
@@ -71,7 +77,7 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 				return nil
 			}
 			d.logger.Error("Snapshots.Next err", zap.Error(err))
-			panic(err)
+			sentry.CaptureException(err)
 		}
 		if snap != nil {
 			for {
@@ -87,7 +93,7 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 				}
 				if err != nil {
 					d.logger.Error("Documents.Next err", zap.Error(err))
-					panic(err)
+					sentry.CaptureException(err)
 				}
 				var projectData Project
 				doc.DataTo(&projectData)
@@ -100,6 +106,21 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 }
 
 func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
+	// Set up sentry
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn: "https://aceadcbf56f14ef9a7fe76b0db5d7351@o1000232.ingest.sentry.io/4504735637176320",
+		// Set TracesSampleRate to 1.0 to capture 100%
+		// of transactions for performance monitoring.
+		// We recommend adjusting this value in production,
+		TracesSampleRate: 1.0,
+	})
+	if err != nil {
+		log.Fatalf("sentry.Init: %s", err)
+	}
+	// Flush buffered events before the program terminates.
+	defer sentry.Flush(2 * time.Second)
+
+	// Initialize the firestore cache
 	var wg sync.WaitGroup
 	d.logger = ctx.Logger(d)
 	d.projectMap = make(map[string]Project)
@@ -125,9 +146,18 @@ func (d *DevxUpstreams) getUpstreamFromProjectId(projectId string, serviceName s
 		if regionCode, ok := REGION_LOOKUP_MAP[project.Region]; ok {
 			return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceName, projectId, gcpProjectHash, regionCode)
 		} else {
+			sentry.CaptureMessage("Could not find project in region")
 			return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceName, projectId, gcpProjectHash, "ew")
 		}
 	}
+	sentry.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelError)
+		scope.SetTags(map[string]string{
+			"project_id":   projectId,
+			"service_name": serviceName,
+		})
+		sentry.CaptureMessage("Could not find upstream")
+	})
 	return ""
 }
 
@@ -141,6 +171,10 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 			},
 		}, nil
 	}
+	sentry.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelWarning)
+		sentry.CaptureMessage("Missing X-Databutton-Service-Type or X-Databutton-Project-Id")
+	})
 	return nil, errors.New("missing x-databutton-project-id header")
 }
 

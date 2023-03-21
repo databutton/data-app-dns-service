@@ -176,7 +176,7 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 
 	// Optimization for direct lookup
 	l.upstreamMap.Store("devx"+"-"+projectID, devxUrl)
-	l.upstreamMap.Store("prodxx"+"-"+projectID, prodxUrl)
+	l.upstreamMap.Store("prodx"+"-"+projectID, prodxUrl)
 
 	// log.Debug("Done processing")
 
@@ -213,37 +213,39 @@ func (l *ProjectListener) Count() int {
 	return n
 }
 
-func (l *ProjectListener) RunUntilCanceled() error {
-	if l == nil {
-		panic("ProjectListener is nil")
-	}
-	if l.ctx == nil {
-		panic("ProjectListener ctx is nil")
-	}
-	if l.firestoreClient == nil {
-		panic("ProjectListener firestoreClient is nil")
-	}
-	if l.logger == nil {
-		panic("ProjectListener logger is nil")
-	}
+// Debug dump of map
+func (l *ProjectListener) Dump() {
+	n := 0
+	l.upstreamMap.Range(
+		func(key, value any) bool {
+			n += 1
+			l.logger.Debug(
+				"DUMP",
+				zap.String("key", key.(string)),
+				zap.String("value", value.(string)),
+			)
+			return true
+		})
+	l.logger.Debug(
+		"COUNT",
+		zap.Int("count", n),
+	)
+}
 
+// TODO: Update this to also delete projects
+func (l *ProjectListener) RunUntilCanceled() error {
 	ctx := l.ctx
-	client := l.firestoreClient
 	log := l.logger
 
-	// TODO: Update this to also delete projects
+	col := l.firestoreClient.Collection(l.collection)
+	if col == nil {
+		return fmt.Errorf("Could not get collection %s", l.collection)
+	}
 
 	initial := true
 
-	log.Info("Getting collection", zap.String("collection", l.collection))
-	col := client.Collection(l.collection)
 	log.Info("Starting query")
-	if col == nil {
-		panic("collection is nil")
-	}
-	query := col.Where("markedForDeletionAt", "==", nil)
-	log.Info("Taking query snapshots")
-	it := query.Snapshots(ctx)
+	it := col.Where("markedForDeletionAt", "==", nil).Snapshots(ctx)
 	for {
 		log.Debug("Next snapshot")
 		snap, err := it.Next()
@@ -296,20 +298,24 @@ func (l *ProjectListener) RunUntilCanceled() error {
 
 func (l *ProjectListener) RunWithRestarts() error {
 	for {
+		l.logger.Info("RunWithRestarts top of loop")
+
 		err := DontPanic(func() error {
 			return l.RunUntilCanceled()
 		})
 
 		// Returns nil for graceful shutdown
 		if err == nil {
+			l.logger.Info("RunWithRestarts graceful shutdown")
 			return nil
 		}
 
 		// Returns error for other cases
 		sentry.CaptureException(err)
-		l.logger.Error("RunUntilCanceled error", zap.Error(err))
+		l.logger.Error("RunWithRestarts got error", zap.Error(err))
 
-		// FIXME: Do we really want to stay alive here?
+		// TODO: Do we want to stay alive here, sleep and circuit break, recreate firestore client? I guess we'll have to learn from prod behaviour...
+		// time.Sleep(100*time.Millisecond)
 		return err
 	}
 }

@@ -137,6 +137,10 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		zap.Duration("loadTime", time.Since(startTime)),
 		zap.Int("projectCount", d.listener.Count()),
 	)
+
+	// Dump all map contents for inspection
+	// d.listener.Dump()
+
 	return nil
 }
 

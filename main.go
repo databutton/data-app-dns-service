@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"time"
 
 	"sync"
 
@@ -22,11 +21,15 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Used to coordinate initialization of dependencies only once
+var usagePool = caddy.NewUsagePool()
+
 type CloudRunService struct {
 	name   string
 	region string
 	url    string
 }
+
 type Project struct {
 	ProjectID string          `firestore:"projectId"`
 	Region    string          `firestore:"region"`
@@ -40,8 +43,9 @@ type DevxUpstreams struct {
 	logger     *zap.Logger
 }
 
-const GCP_PROJECT = "databutton"
-const GCP_PROJECT_HASH = "gvjcjtpafa"
+func init() {
+	caddy.RegisterModule(DevxUpstreams{})
+}
 
 // CaddyModule returns the Caddy module information.
 func (DevxUpstreams) CaddyModule() caddy.ModuleInfo {
@@ -51,9 +55,9 @@ func (DevxUpstreams) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-func init() {
-	caddy.RegisterModule(DevxUpstreams{})
-
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
+func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	return nil
 }
 
 // TODO: Update this to also delete stuff projects.
@@ -107,18 +111,9 @@ func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, w
 
 func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	// Set up sentry
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn: "https://aceadcbf56f14ef9a7fe76b0db5d7351@o1000232.ingest.sentry.io/4504735637176320",
-		// Set TracesSampleRate to 1.0 to capture 100%
-		// of transactions for performance monitoring.
-		// We recommend adjusting this value in production,
-		TracesSampleRate: 1.0,
-	})
-	if err != nil {
+	if err := initSentry(); err != nil {
 		log.Fatalf("sentry.Init: %s", err)
 	}
-	// Flush buffered events before the program terminates.
-	defer sentry.Flush(2 * time.Second)
 
 	// Initialize the firestore cache
 	var wg sync.WaitGroup
@@ -132,13 +127,14 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-var REGION_LOOKUP_MAP = map[string]string{
-	"europe-west1":      "ew",
-	"europe-north1":     "lz",
-	"europe-southwest1": "no",
-	"europe-west9":      "od",
-	"europe-west4":      "ez",
-	"europe-west8":      "oc",
+// Validate implements caddy.Validator
+func (*DevxUpstreams) Validate() error {
+	return nil
+}
+
+// Cleanup implements caddy.CleanerUpper
+func (*DevxUpstreams) Cleanup() error {
+	return nil
 }
 
 func (d *DevxUpstreams) getUpstreamFromProjectId(projectId string, serviceName string, gcpProjectHash string) string {
@@ -178,14 +174,11 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	return nil, errors.New("missing x-databutton-project-id header")
 }
 
-// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
-func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	return nil
-}
-
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*DevxUpstreams)(nil)
+	_ caddy.Validator             = (*DevxUpstreams)(nil)
+	_ caddy.CleanerUpper          = (*DevxUpstreams)(nil)
 	_ reverseproxy.UpstreamSource = (*DevxUpstreams)(nil)
 	_ caddyfile.Unmarshaler       = (*DevxUpstreams)(nil)
 )

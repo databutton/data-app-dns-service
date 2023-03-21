@@ -175,8 +175,8 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	l.projectMap.Store(projectID, project)
 
 	// Optimization for direct lookup
-	l.upstreamMap.Store("devx"+"-"+projectID, devxUrl)
-	l.upstreamMap.Store("prodx"+"-"+projectID, prodxUrl)
+	l.upstreamMap.Store("devx"+projectID, devxUrl)
+	l.upstreamMap.Store("prodx"+projectID, prodxUrl)
 
 	// log.Debug("Done processing")
 

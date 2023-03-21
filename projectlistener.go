@@ -2,7 +2,6 @@ package dataappdnsservice
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
@@ -50,20 +49,19 @@ type Project struct {
 }
 
 type ProjectListener struct {
-	collection string
-	projectMap sync.Map
-	wg         sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
+	collection  string
+	projectMap  sync.Map
+	upstreamMap sync.Map
+	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 func NewProjectListener(collection string) *ProjectListener {
 	ctx, cancel := context.WithCancel(context.Background())
 	pl := &ProjectListener{
-		projectMap: sync.Map{},
-		collection: collection,
-		ctx:        ctx,
-		cancel:     cancel,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	pl.wg.Add(1)
 	return pl
@@ -111,6 +109,8 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	devxUrl := fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", "devx", projectID, GCP_PROJECT_HASH, regionCode)
 	prodxUrl := fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", "prodx", projectID, GCP_PROJECT_HASH, regionCode)
 
+	// We don't really need all this at the moment,
+	// but I think we want to extend this for use in authorization
 	project := Project{
 		ProjectDoc: projectData,
 		ProjectID:  projectID,
@@ -130,10 +130,12 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	// Write to threadsafe map
 	l.projectMap.Store(projectID, project)
 
+	// Optimization for direct lookup
+	l.upstreamMap.Store("devx"+"-"+projectID, devxUrl)
+	l.upstreamMap.Store("prodxx"+"-"+projectID, prodxUrl)
+
 	return nil
 }
-
-var ProjectNotFoundError = errors.New("Project not found")
 
 // Re-entrant project cache lookup
 func (l *ProjectListener) LookupProject(projectID string) (Project, bool) {
@@ -143,6 +145,26 @@ func (l *ProjectListener) LookupProject(projectID string) (Project, bool) {
 	}
 	project, ok := value.(Project)
 	return project, ok
+}
+
+// Re-entrant optimized cache lookup for the upstream url only
+func (l *ProjectListener) LookupUpUrl(projectID, serviceType string) string {
+	value, ok := l.upstreamMap.Load(serviceType + projectID)
+	if !ok {
+		return ""
+	}
+	return value.(string)
+}
+
+// Count how many projects are in the cache
+func (l *ProjectListener) Count() int {
+	n := 0
+	l.projectMap.Range(
+		func(key, value any) bool {
+			n += 1
+			return true
+		})
+	return n
 }
 
 func (l *ProjectListener) RunUntilCanceled() error {

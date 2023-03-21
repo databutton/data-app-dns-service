@@ -7,7 +7,7 @@ import (
 	"github.com/getsentry/sentry-go"
 )
 
-const sentryUsageKey = "sentryInit"
+const sentryInitUsagePoolKey = "sentryInit"
 
 type SentryDestructor struct {
 }
@@ -21,7 +21,7 @@ func (SentryDestructor) Destruct() error {
 var _ caddy.Destructor = SentryDestructor{}
 
 func initSentry() error {
-	_, _, err := usagePool.LoadOrNew(sentryUsageKey, func() (caddy.Destructor, error) {
+	_, _, err := usagePool.LoadOrNew(sentryInitUsagePoolKey, func() (caddy.Destructor, error) {
 		// Set up sentry
 		err := sentry.Init(sentry.ClientOptions{
 			Dsn:              SENTRY_DSN,

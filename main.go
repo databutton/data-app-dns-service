@@ -2,7 +2,9 @@ package dataappdnsservice
 
 import (
 	"errors"
+	"io"
 	"net/http"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -14,32 +16,13 @@ import (
 // Used to coordinate initialization of dependencies only once
 var usagePool = caddy.NewUsagePool()
 
-const projectsListenerUsageKey = "projectsListener"
-
-// Initialize and launch projects listener only once, and
-// return the running instance instantly if it's already running
-func GetOrLaunchProjectsListener() (*ProjectListener, error) {
-	listener, loaded, err := usagePool.LoadOrNew(projectsListenerUsageKey, func() (caddy.Destructor, error) {
-		listener := NewProjectListener("projects")
-		go listener.RunWithRestarts()
-		return listener, nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: Log whether this happened
-	_ = loaded
-	// logger.Info(loaded)
-
-	return listener.(*ProjectListener), nil
-}
+const projectsListenerUsagePoolKey = "projectsListener"
 
 type DevxUpstreams struct {
 	logger    *zap.Logger
 	listener  *ProjectListener
 	usageKeys []string
+	closers   []io.Closer
 }
 
 func init() {
@@ -69,15 +52,31 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		d.logger.Error("sentry.Init: %s", zap.Error(err))
 		return err
 	}
-	d.usageKeys = append(d.usageKeys, sentryUsageKey)
+	d.usageKeys = append(d.usageKeys, sentryInitUsagePoolKey)
 
 	// Initialize the firestore cache (launches goroutine only once)
-	d.listener, err = GetOrLaunchProjectsListener()
+	startTime := time.Now()
+	const collection = "projects"
+	listener, listenerLoaded, err := usagePool.LoadOrNew(projectsListenerUsagePoolKey, func() (caddy.Destructor, error) {
+		listener := NewProjectListener(collection)
+		go listener.RunWithRestarts()
+		return listener, nil
+	})
 	if err != nil {
-		d.logger.Error("GetOrLaunchProjectsListener: %s", zap.Error(err))
+		d.logger.Error(
+			"Error loading listener",
+			zap.Bool("loaded", listenerLoaded),
+			zap.Error(err),
+		)
 		return err
 	}
-	d.usageKeys = append(d.usageKeys, projectsListenerUsageKey)
+	d.listener = listener.(*ProjectListener)
+	d.usageKeys = append(d.usageKeys, projectsListenerUsagePoolKey)
+	d.logger.Info("Launched projects listener",
+		zap.Bool("loaded", listenerLoaded),
+		zap.Duration("loadTime", time.Since(startTime)),
+		zap.Int("projectCount", d.listener.Count()),
+	)
 
 	// Wait until the listener has fetched all projects at least once,
 	// if this has been called before it should return instantly.
@@ -90,74 +89,77 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	return nil
 }
 
-// Validate implements caddy.Validator
+// Validate implements caddy.Validator.
+//
+// Honestly I'm not sure if there's any benefit
+// to doing things here instead of in Provision.
 func (*DevxUpstreams) Validate() error {
 	return nil
 }
 
-// Cleanup implements caddy.CleanerUpper
+// Cleanup implements caddy.CleanerUpper.
+//
+// Decrements usagePool counters which eventually
+// leads to their destructors being called.
 func (du *DevxUpstreams) Cleanup() error {
-	// FIXME: Catch panic and log it in case we decrement too many times
-
 	var allErrors []error
 	for _, key := range du.usageKeys {
-		deleted, err := usagePool.Delete(key)
-		if err != nil {
-			allErrors = append(allErrors, err)
-		}
-		if deleted {
-			du.logger.Sugar().Infof("Destructor for %s was run", key)
-		}
+		// Catch panic from Delete in case we have a bug and decrement too many times
+		err := DontPanic(func() error {
+			deleted, err := usagePool.Delete(key)
+			du.logger.Info("Decremented usage counter",
+				zap.String("key", key),
+				zap.Bool("deleted", deleted),
+				zap.Error(err),
+			)
+			return err
+		})
+		allErrors = append(allErrors, err)
 	}
-	return errors.Join(allErrors...)
+
+	// Capture shutdown errors to sentry, just so we know if it happens
+	err := errors.Join(allErrors...)
+	if err != nil {
+		sentry.CaptureException(err)
+	}
+	return err
 }
 
+// GetUpstreams implements reverseproxy.UpstreamSource.
+//
+// This is what's called for every request.
+// It needs to be threadsafe and fast!
 func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
-
-	if projectID == "" {
-		return nil, errors.New("X-Databutton-Project-Id header missing")
+	upstream := d.listener.LookupUpUrl(projectID, serviceType)
+	if upstream != "" {
+		return []*reverseproxy.Upstream{
+			{
+				Dial: upstream,
+			},
+		}, nil
 	}
 
-	project, ok := d.listener.LookupProject(projectID)
-	if !ok {
-		err := errors.New("Could not find project")
-		sentry.ConfigureScope(func(scope *sentry.Scope) {
-			scope.SetLevel(sentry.LevelError)
-			scope.SetTags(map[string]string{
-				"project_id":   projectID,
-				"service_type": serviceType,
-			})
-			sentry.CaptureException(err)
-		})
-		return nil, err
-	}
-
-	var upstream string
-	switch serviceType {
-	case "devx":
-		upstream = project.Devx.url
-	case "prodx":
-		upstream = project.Prodx.url
+	var err error
+	switch {
+	case projectID == "":
+		err = errors.New("X-Databutton-Project-Id header missing")
+	case serviceType == "":
+		err = errors.New("X-Databutton-Service-Type header missing")
 	default:
-		err := errors.New("X-Databutton-Service-Type header missing or invalid")
-		sentry.ConfigureScope(func(scope *sentry.Scope) {
-			scope.SetLevel(sentry.LevelWarning)
-			scope.SetTags(map[string]string{
-				"project_id":   projectID,
-				"service_type": serviceType,
-			})
-			sentry.CaptureException(err)
-		})
-		return nil, err
+		err = errors.New("Could not find upstream url")
 	}
 
-	return []*reverseproxy.Upstream{
-		{
-			Dial: upstream,
-		},
-	}, nil
+	sentry.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelError)
+		scope.SetTags(map[string]string{
+			"project_id":   projectID,
+			"service_type": serviceType,
+		})
+		sentry.CaptureException(err)
+	})
+	return nil, err
 }
 
 // Interface guards

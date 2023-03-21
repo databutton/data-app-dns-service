@@ -7,6 +7,8 @@ import (
 	"github.com/getsentry/sentry-go"
 )
 
+const sentryUsageKey = "sentryInit"
+
 type SentryDestructor struct {
 }
 
@@ -19,14 +21,11 @@ func (SentryDestructor) Destruct() error {
 var _ caddy.Destructor = SentryDestructor{}
 
 func initSentry() error {
-	_, _, err := usagePool.LoadOrNew("sentryInit", func() (caddy.Destructor, error) {
+	_, _, err := usagePool.LoadOrNew(sentryUsageKey, func() (caddy.Destructor, error) {
 		// Set up sentry
 		err := sentry.Init(sentry.ClientOptions{
-			Dsn: SENTRY_DSN,
-			// Set TracesSampleRate to 1.0 to capture 100%
-			// of transactions for performance monitoring.
-			// We recommend adjusting this value in production,
-			TracesSampleRate: 1.0,
+			Dsn:              SENTRY_DSN,
+			TracesSampleRate: SENTRY_TRACES_SAMPLE_RATE,
 		})
 		if err != nil {
 			return nil, err

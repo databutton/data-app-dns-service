@@ -16,7 +16,41 @@ import (
 // Used to coordinate initialization of dependencies only once
 var usagePool = caddy.NewUsagePool()
 
-const projectsListenerUsagePoolKey = "projectsListener"
+const (
+	projectsListenerUsagePoolKey = "projectsListener"
+	sentryInitUsagePoolKey       = "sentryInit"
+)
+
+type SentryDestructor struct {
+}
+
+func (SentryDestructor) Destruct() error {
+	// Flush buffered events before the program terminates.
+	sentry.Flush(2 * time.Second)
+	return nil
+}
+
+var _ caddy.Destructor = SentryDestructor{}
+
+// Configure Sentry once even if called multiple times,
+// and flush when usagePool has been decremented.
+func initSentry(logger *zap.Logger) error {
+	_, loaded, err := usagePool.LoadOrNew(sentryInitUsagePoolKey, func() (caddy.Destructor, error) {
+		err := sentry.Init(sentry.ClientOptions{
+			Dsn:              SENTRY_DSN,
+			TracesSampleRate: SENTRY_TRACES_SAMPLE_RATE,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return SentryDestructor{}, nil
+	})
+	logger.Info("initSentry completed",
+		zap.Bool("loaded", loaded),
+		zap.Error(err),
+	)
+	return err
+}
 
 type DevxUpstreams struct {
 	logger    *zap.Logger
@@ -45,11 +79,12 @@ func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	// Get logger for the context of this caddy module instance
 	d.logger = ctx.Logger(d)
+	d.logger.Debug("Provision called")
 
 	// Set up sentry (happens only once)
-	err := initSentry()
+	err := initSentry(d.logger)
 	if err != nil {
-		d.logger.Error("sentry.Init: %s", zap.Error(err))
+		d.logger.Error("initSentry returned error", zap.Error(err))
 		return err
 	}
 	d.usageKeys = append(d.usageKeys, sentryInitUsagePoolKey)
@@ -58,8 +93,19 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	startTime := time.Now()
 	const collection = "projects"
 	listener, listenerLoaded, err := usagePool.LoadOrNew(projectsListenerUsagePoolKey, func() (caddy.Destructor, error) {
-		listener := NewProjectListener(collection)
+		d.logger.Info("Creating project listener")
+
+		// FIXME: Create a logger not associated with the caddy module instance
+		logger := d.logger.With(zap.String("context", "projectsListener"))
+
+		listener, err := NewProjectListener(collection, logger)
+		if err != nil {
+			return listener, err
+		}
+
+		d.logger.Info("Starting project listener goroutine")
 		go listener.RunWithRestarts()
+
 		return listener, nil
 	})
 	if err != nil {
@@ -86,6 +132,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		return err
 	}
 
+	d.logger.Debug("Provision done")
 	return nil
 }
 
@@ -93,7 +140,8 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 //
 // Honestly I'm not sure if there's any benefit
 // to doing things here instead of in Provision.
-func (*DevxUpstreams) Validate() error {
+func (d *DevxUpstreams) Validate() error {
+	d.logger.Debug("Validate called")
 	return nil
 }
 
@@ -121,6 +169,7 @@ func (du *DevxUpstreams) Cleanup() error {
 	err := errors.Join(allErrors...)
 	if err != nil {
 		sentry.CaptureException(err)
+		du.logger.Warn("Errors during shutdown", zap.Error(err))
 	}
 	return err
 }
@@ -134,6 +183,12 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 	if upstream != "" {
+		d.logger.Debug(
+			"Got upstream",
+			zap.String("upstream", upstream),
+			zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+		)
 		return []*reverseproxy.Upstream{
 			{
 				Dial: upstream,
@@ -151,7 +206,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 		err = errors.New("Could not find upstream url")
 	}
 
-	sentry.ConfigureScope(func(scope *sentry.Scope) {
+	sentry.WithScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentry.LevelError)
 		scope.SetTags(map[string]string{
 			"project_id":   projectID,
@@ -159,6 +214,11 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 		})
 		sentry.CaptureException(err)
 	})
+	d.logger.Error(
+		"Failed to get upstream",
+		zap.String("projectID", projectID),
+		zap.String("serviceType", serviceType),
+	)
 	return nil, err
 }
 

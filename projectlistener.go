@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/getsentry/sentry-go"
+	"go.uber.org/zap"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -49,53 +51,79 @@ type Project struct {
 }
 
 type ProjectListener struct {
-	collection  string
-	projectMap  sync.Map
-	upstreamMap sync.Map
-	wgDoneOnce  sync.Once
-	wg          sync.WaitGroup
-	ctx         context.Context
-	cancel      context.CancelFunc
+	collection      string
+	firestoreClient *firestore.Client
+	projectMap      sync.Map
+	upstreamMap     sync.Map
+	wgDoneOnce      sync.Once
+	wg              sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	logger          *zap.Logger
 }
 
-func NewProjectListener(collection string) *ProjectListener {
+func NewProjectListener(collection string, logger *zap.Logger) (*ProjectListener, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	pl := &ProjectListener{
-		ctx:    ctx,
-		cancel: cancel,
+
+	client, err := firestore.NewClient(ctx, GCP_PROJECT)
+	if err != nil {
+		return nil, err
 	}
-	pl.wg.Add(1)
-	return pl
+
+	l := &ProjectListener{
+		ctx:             ctx,
+		cancel:          cancel,
+		firestoreClient: client,
+		logger:          logger,
+	}
+
+	// This blocks WaitOnFirstSync() until wg.Done() is called
+	l.wg.Add(1)
+
+	return l, nil
 }
 
 // Destruct implements caddy.Destructor
-func (pl *ProjectListener) Destruct() error {
-	// Thsi should shut down the background goroutine
-	defer pl.cancel()
-	return nil
+func (l *ProjectListener) Destruct() error {
+	// This should make the background goroutine exit
+	l.cancel()
+
+	l.logger.Info("Running project listener destructor")
+
+	// Wait for graceful shutdown of goroutine
+	time.Sleep(100 * time.Millisecond)
+
+	// This will make the background goroutine start failing
+	return l.firestoreClient.Close()
 }
 
 var _ caddy.Destructor = (*ProjectListener)(nil)
 
 // Wait until first sync has happened
 func (l *ProjectListener) WaitOnFirstSync(ctx context.Context) error {
+	l.logger.Info("Waiting on first sync")
 	l.wg.Wait()
+	l.logger.Info("Done waiting on first sync")
 	return nil
 }
 
 // Notify that first sync has happened
-func (l *ProjectListener) NotifyFirstSync(ctx context.Context) error {
-	// var done atomic.Bool
-	// b := done.Load()
-
-	// wg.Done() can only be called once per wg.Add
+func (l *ProjectListener) notifyFirstSync() error {
+	// wg.Done() panics if it's called more than once per wg.Add(1)
+	// and this will be called repeatedly
 	l.wgDoneOnce.Do(func() {
 		l.wg.Done()
+		l.logger.Info("Initial sync complete!")
 	})
 	return nil
 }
 
 func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
+	projectID := doc.Ref.ID
+
+	log := l.logger.With(zap.String("id", projectID))
+	log.Info("Processing")
+
 	// Parse document
 	var projectData ProjectDoc
 	err := doc.DataTo(&projectData)
@@ -106,11 +134,10 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	// Look up short region code with fallback for migration
 	regionCode, ok := REGION_LOOKUP_MAP[projectData.Region]
 	if !ok {
-		sentry.CaptureMessage("Could not find project in region")
+		log.Info("Could not find project region", zap.String("region", projectData.Region))
+		sentry.CaptureMessage("Could not find project region")
 		regionCode = "ew"
 	}
-
-	projectID := doc.Ref.ID
 
 	devxUrl := fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", "devx", projectID, GCP_PROJECT_HASH, regionCode)
 	prodxUrl := fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", "prodx", projectID, GCP_PROJECT_HASH, regionCode)
@@ -139,6 +166,8 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	// Optimization for direct lookup
 	l.upstreamMap.Store("devx"+"-"+projectID, devxUrl)
 	l.upstreamMap.Store("prodxx"+"-"+projectID, prodxUrl)
+
+	log.Info("Done processing")
 
 	return nil
 }
@@ -175,60 +204,62 @@ func (l *ProjectListener) Count() int {
 
 func (l *ProjectListener) RunUntilCanceled() error {
 	ctx := l.ctx
-
-	// TODO: Get zap logger that's not associated with module _instance_?
-
-	client, err := firestore.NewClient(ctx, GCP_PROJECT)
-	if err != nil {
-		sentry.CaptureException(err)
-		return err
-	}
-	defer client.Close()
+	client := l.firestoreClient
+	log := l.logger
 
 	// TODO: Update this to also delete projects
 
-	var initial = true
+	initial := true
+
 	it := client.Collection(l.collection).Where("markedForDeletionAt", "==", nil).Snapshots(ctx)
 	for {
 		snap, err := it.Next()
+
+		if status.Code(err) == codes.Canceled {
+			log.Warn("Shutting down gracefully, I've been cancelled.", zap.Error(err))
+			return nil
+		}
+
 		if err != nil {
-			if status.Code(err) == codes.Canceled {
-				// l.logger.Info("Shutting down gracefully, I've been cancelled.")
-				return nil
-			}
-
-			//l.logger.Error("Snapshots.Next err", zap.Error(err))
+			log.Error("Snapshots.Next err", zap.Error(err))
 			sentry.CaptureException(err)
+			// The way I understand it, once we get an error here the iterator won't recover
+			return err
+		}
 
-		} else if snap != nil {
-			for {
-				doc, err := snap.Documents.Next()
+		for {
+			doc, err := snap.Documents.Next()
 
-				if err == iterator.Done {
-					if initial {
-						// Notify the provisioner that we've done the first sync.
-						l.NotifyFirstSync(ctx)
-						initial = false
-						// l.logger.Info("Initial sync complete!")
-					}
-					break
+			if err == iterator.Done {
+				// Notify the provisioner that we've done the first sync.
+				if initial {
+					log.Debug("First sync complete")
+					l.notifyFirstSync()
+					initial = false
 				}
 
-				if err != nil {
-					// l.logger.Error("Documents.Next err", zap.Error(err))
-					sentry.CaptureException(err)
-					break // TODO: Break or fail all the way?
-				}
-
-				if err := l.ProcessDoc(ctx, doc); err != nil {
-					sentry.CaptureException(err)
-					break // TODO: Break or fail all the way?
-				}
+				// Once we get Done from Next we'll always get Done.
+				log.Debug("Done processing snapshots")
+				break
 			}
-		} else {
-			// Shouldn't happen?
+
+			if err != nil {
+				sentry.CaptureException(err)
+				log.Error("Documents.Next error", zap.Error(err))
+				break
+			}
+
+			// Process a single document
+			if err := l.ProcessDoc(ctx, doc); err != nil {
+				// Notify us but keep going if it fails
+				// TODO: add "id":doc.Ref.Id in sentry scope
+				sentry.CaptureException(err)
+				log.Error("ProcessDoc error", zap.Error(err))
+			}
 		}
 	}
+
+	return nil
 }
 
 func (l *ProjectListener) RunWithRestarts() error {

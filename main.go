@@ -118,6 +118,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	}
 	d.listener = listener.(*ProjectListener)
 	d.usageKeys = append(d.usageKeys, projectsListenerUsagePoolKey)
+
 	d.logger.Info("Launched projects listener",
 		zap.Bool("loaded", listenerLoaded),
 		zap.Duration("loadTime", time.Since(startTime)),
@@ -132,7 +133,10 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		return err
 	}
 
-	d.logger.Debug("Provision done")
+	d.logger.Debug("Provision done",
+		zap.Duration("loadTime", time.Since(startTime)),
+		zap.Int("projectCount", d.listener.Count()),
+	)
 	return nil
 }
 

@@ -63,6 +63,10 @@ type ProjectListener struct {
 }
 
 func NewProjectListener(collection string, logger *zap.Logger) (*ProjectListener, error) {
+	if collection == "" {
+		return nil, fmt.Errorf("collection name is empty")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	client, err := firestore.NewClient(ctx, GCP_PROJECT)
@@ -71,6 +75,7 @@ func NewProjectListener(collection string, logger *zap.Logger) (*ProjectListener
 	}
 
 	l := &ProjectListener{
+		collection:      collection,
 		ctx:             ctx,
 		cancel:          cancel,
 		firestoreClient: client,
@@ -122,7 +127,7 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	projectID := doc.Ref.ID
 
 	log := l.logger.With(zap.String("id", projectID))
-	log.Info("Processing")
+	// log.Debug("Processing")
 
 	// Parse document
 	var projectData ProjectDoc
@@ -134,8 +139,14 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	// Look up short region code with fallback for migration
 	regionCode, ok := REGION_LOOKUP_MAP[projectData.Region]
 	if !ok {
-		log.Info("Could not find project region", zap.String("region", projectData.Region))
-		sentry.CaptureMessage("Could not find project region")
+		if projectData.Region != "" {
+			log.Error("Could not find project region", zap.String("region", projectData.Region))
+			sentry.CaptureMessage("Could not find project region")
+			return fmt.Errorf("Invalid region: %s", projectData.Region)
+		}
+
+		// log.Debug("Could not find project region, assuming ew", zap.String("region", projectData.Region))
+		sentry.CaptureMessage("Could not find project region, assuming ew")
 		regionCode = "ew"
 	}
 
@@ -167,7 +178,7 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	l.upstreamMap.Store("devx"+"-"+projectID, devxUrl)
 	l.upstreamMap.Store("prodxx"+"-"+projectID, prodxUrl)
 
-	log.Info("Done processing")
+	// log.Debug("Done processing")
 
 	return nil
 }
@@ -203,6 +214,19 @@ func (l *ProjectListener) Count() int {
 }
 
 func (l *ProjectListener) RunUntilCanceled() error {
+	if l == nil {
+		panic("ProjectListener is nil")
+	}
+	if l.ctx == nil {
+		panic("ProjectListener ctx is nil")
+	}
+	if l.firestoreClient == nil {
+		panic("ProjectListener firestoreClient is nil")
+	}
+	if l.logger == nil {
+		panic("ProjectListener logger is nil")
+	}
+
 	ctx := l.ctx
 	client := l.firestoreClient
 	log := l.logger
@@ -211,8 +235,17 @@ func (l *ProjectListener) RunUntilCanceled() error {
 
 	initial := true
 
-	it := client.Collection(l.collection).Where("markedForDeletionAt", "==", nil).Snapshots(ctx)
+	log.Info("Getting collection", zap.String("collection", l.collection))
+	col := client.Collection(l.collection)
+	log.Info("Starting query")
+	if col == nil {
+		panic("collection is nil")
+	}
+	query := col.Where("markedForDeletionAt", "==", nil)
+	log.Info("Taking query snapshots")
+	it := query.Snapshots(ctx)
 	for {
+		log.Debug("Next snapshot")
 		snap, err := it.Next()
 
 		if status.Code(err) == codes.Canceled {
@@ -228,12 +261,13 @@ func (l *ProjectListener) RunUntilCanceled() error {
 		}
 
 		for {
+			// log.Debug("Next document")
 			doc, err := snap.Documents.Next()
 
 			if err == iterator.Done {
 				// Notify the provisioner that we've done the first sync.
 				if initial {
-					log.Debug("First sync complete")
+					// log.Debug("First sync complete")
 					l.notifyFirstSync()
 					initial = false
 				}
@@ -258,20 +292,24 @@ func (l *ProjectListener) RunUntilCanceled() error {
 			}
 		}
 	}
-
-	return nil
 }
 
 func (l *ProjectListener) RunWithRestarts() error {
 	for {
-		err := DontPanic(func() error { return l.RunUntilCanceled() })
-		if err != nil {
-			sentry.CaptureException(err)
-			// FIXME: Do we really want to stay alive here?
-			// return err
-		}
+		err := DontPanic(func() error {
+			return l.RunUntilCanceled()
+		})
+
+		// Returns nil for graceful shutdown
 		if err == nil {
 			return nil
 		}
+
+		// Returns error for other cases
+		sentry.CaptureException(err)
+		l.logger.Error("RunUntilCanceled error", zap.Error(err))
+
+		// FIXME: Do we really want to stay alive here?
+		return err
 	}
 }

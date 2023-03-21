@@ -23,18 +23,18 @@ func DontPanic(f func() error) (err error) {
 	return
 }
 
-type CloudRunService struct {
-	name   string
-	region string
-	url    string
-}
-
 // Partial document to be parsed from firestore document
 type ProjectDoc struct {
 	Region string `firestore:"region"`
 
 	// DevxURL  string `firestore:"devxUrl"`
 	// ProdxURL string `firestore:"prodxUrl"`
+}
+
+type CloudRunService struct {
+	Name   string
+	Region string
+	Url    string
 }
 
 // Cached project document
@@ -52,6 +52,7 @@ type ProjectListener struct {
 	collection  string
 	projectMap  sync.Map
 	upstreamMap sync.Map
+	wgDoneOnce  sync.Once
 	wg          sync.WaitGroup
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -84,8 +85,13 @@ func (l *ProjectListener) WaitOnFirstSync(ctx context.Context) error {
 
 // Notify that first sync has happened
 func (l *ProjectListener) NotifyFirstSync(ctx context.Context) error {
-	// FIXME: This can't happen more than once, wrong primitive?
-	l.wg.Done()
+	// var done atomic.Bool
+	// b := done.Load()
+
+	// wg.Done() can only be called once per wg.Add
+	l.wgDoneOnce.Do(func() {
+		l.wg.Done()
+	})
 	return nil
 }
 
@@ -116,14 +122,14 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 		ProjectID:  projectID,
 		RegionCode: regionCode,
 		Devx: CloudRunService{
-			name:   "devx",
-			region: regionCode,
-			url:    devxUrl,
+			Name:   "devx",
+			Region: regionCode,
+			Url:    devxUrl,
 		},
 		Prodx: CloudRunService{
-			name:   "prodx",
-			region: regionCode,
-			url:    prodxUrl,
+			Name:   "prodx",
+			Region: regionCode,
+			Url:    prodxUrl,
 		},
 	}
 

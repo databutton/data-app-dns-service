@@ -236,7 +236,7 @@ func (l *ProjectListener) Dump() {
 	)
 }
 
-// TODO: Update this to also delete projects
+// TODO: Update this to also delete projects (although deleted projects will be gone on a restart so not critical for a long time)
 func (l *ProjectListener) RunUntilCanceled() error {
 	ctx := l.ctx
 	log := l.logger
@@ -308,6 +308,7 @@ func (l *ProjectListener) RunWithRestarts() error {
 	// Cheap attempt at a few retries
 	const maxErrors = 3
 	const delayBetweenRetry = time.Millisecond * 200
+	var lastError error
 	for attempt := 0; attempt < maxErrors; attempt++ {
 		if attempt > 0 {
 			time.Sleep(100 * time.Millisecond)
@@ -339,5 +340,7 @@ func (l *ProjectListener) RunWithRestarts() error {
 			sentry.CaptureException(err)
 		})
 		log.Error("RunWithRestarts got error", zap.Error(err))
+		lastError = err
 	}
+	return lastError
 }

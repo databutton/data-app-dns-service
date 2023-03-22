@@ -1,6 +1,7 @@
 package dataappdnsservice
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ var (
 	ErrServiceHeaderMissing = errors.New("X-Databutton-Service-Type header missing")
 	ErrUpstreamNotFound     = errors.New("Could not find upstream url")
 	ErrInvalidRegion        = errors.New("Invalid region")
+	ErrChaos                = errors.New("Chaos test for testing")
 )
 
 // Used to coordinate initialization of dependencies only once
@@ -81,6 +83,7 @@ func (DevxUpstreams) CaddyModule() caddy.ModuleInfo {
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	// TODO: We must implement this function, but should we do something here?
 	return nil
 }
 
@@ -112,7 +115,17 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		}
 
 		d.logger.Info("Starting project listener goroutine")
-		go listener.RunWithRestarts()
+		go func() {
+			// This should run forever
+			err := listener.RunWithRestarts()
+
+			// Panic in a goroutine kills the program abruptly,
+			// do that unless we were canceled. Perhaps there
+			// is a nicer way to shut down caddy, we'll see in prod...
+			if !errors.Is(listener.ctx.Err(), context.Canceled) {
+				panic(err)
+			}
+		}()
 
 		return listener, nil
 	})
@@ -198,6 +211,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
+
 	if upstream != "" {
 		d.logger.Debug(
 			"Got upstream",

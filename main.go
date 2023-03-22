@@ -1,47 +1,75 @@
 package dataappdnsservice
 
 import (
-	"context"
 	"errors"
-	"fmt"
-	"log"
+	"io"
 	"net/http"
 	"time"
 
-	"sync"
-
-	"cloud.google.com/go/firestore"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
-
-	"google.golang.org/api/iterator"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
-type CloudRunService struct {
-	name   string
-	region string
-	url    string
+// Errors
+var (
+	ErrProjectHeaderMissing = errors.New("X-Databutton-Project-Id header missing")
+	ErrServiceHeaderMissing = errors.New("X-Databutton-Service-Type header missing")
+	ErrUpstreamNotFound     = errors.New("Could not find upstream url")
+	ErrInvalidRegion        = errors.New("Invalid region")
+)
+
+// Used to coordinate initialization of dependencies only once
+var usagePool = caddy.NewUsagePool()
+
+const (
+	projectsListenerUsagePoolKey = "projectsListener"
+	sentryInitUsagePoolKey       = "sentryInit"
+)
+
+type SentryDestructor struct {
 }
-type Project struct {
-	ProjectID string          `firestore:"projectId"`
-	Region    string          `firestore:"region"`
-	devx      CloudRunService `firestore:"devx"`
-	prodx     CloudRunService `firestore:"prodx"`
-	DevxURL   string          `firestore:"devxUrl"`
+
+func (SentryDestructor) Destruct() error {
+	// Flush buffered events before the program terminates.
+	sentry.Flush(2 * time.Second)
+	return nil
+}
+
+var _ caddy.Destructor = SentryDestructor{}
+
+// Configure Sentry once even if called multiple times,
+// and flush when usagePool has been decremented.
+func initSentry(logger *zap.Logger) error {
+	_, loaded, err := usagePool.LoadOrNew(sentryInitUsagePoolKey, func() (caddy.Destructor, error) {
+		err := sentry.Init(sentry.ClientOptions{
+			Dsn:              SENTRY_DSN,
+			TracesSampleRate: SENTRY_TRACES_SAMPLE_RATE,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return SentryDestructor{}, nil
+	})
+	logger.Info("initSentry completed",
+		zap.Bool("loaded", loaded),
+		zap.Error(err),
+	)
+	return err
 }
 
 type DevxUpstreams struct {
-	projectMap map[string]Project
-	logger     *zap.Logger
+	logger    *zap.Logger
+	listener  *ProjectListener
+	usageKeys []string
+	closers   []io.Closer
 }
 
-const GCP_PROJECT = "databutton"
-const GCP_PROJECT_HASH = "gvjcjtpafa"
+func init() {
+	caddy.RegisterModule(DevxUpstreams{})
+}
 
 // CaddyModule returns the Caddy module information.
 func (DevxUpstreams) CaddyModule() caddy.ModuleInfo {
@@ -51,141 +79,170 @@ func (DevxUpstreams) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-func init() {
-	caddy.RegisterModule(DevxUpstreams{})
-
-}
-
-// TODO: Update this to also delete stuff projects.
-func (d *DevxUpstreams) listenMultiple(ctx context.Context, collection string, wg *sync.WaitGroup, initial bool) error {
-	bg := context.Background()
-
-	// TODO: Put projectId (databutton) as an envvar or some other config.
-	client, err := firestore.NewClient(bg, GCP_PROJECT)
-	if err != nil {
-		sentry.CaptureException(err)
-		panic(err)
-	}
-	defer client.Close()
-
-	it := client.Collection(collection).Where("markedForDeletionAt", "==", nil).Snapshots(ctx)
-	for {
-		snap, err := it.Next()
-		if err != nil {
-			if status.Code(err) == codes.Canceled {
-				d.logger.Info("Shutting down gracefully, I've been cancelled.")
-				return nil
-			}
-			d.logger.Error("Snapshots.Next err", zap.Error(err))
-			sentry.CaptureException(err)
-		}
-		if snap != nil {
-			for {
-				doc, err := snap.Documents.Next()
-				if err == iterator.Done {
-					if initial {
-						// Notify the provisioner that we've done the first sync.
-						wg.Done()
-						d.logger.Info("Initial sync complete!")
-						initial = false
-					}
-					break
-				}
-				if err != nil {
-					d.logger.Error("Documents.Next err", zap.Error(err))
-					sentry.CaptureException(err)
-				}
-				var projectData Project
-				doc.DataTo(&projectData)
-				projectData.ProjectID = doc.Ref.ID
-				d.projectMap[projectData.ProjectID] = projectData
-			}
-		}
-	}
-
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
+func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	return nil
 }
 
 func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
-	// Set up sentry
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn: "https://aceadcbf56f14ef9a7fe76b0db5d7351@o1000232.ingest.sentry.io/4504735637176320",
-		// Set TracesSampleRate to 1.0 to capture 100%
-		// of transactions for performance monitoring.
-		// We recommend adjusting this value in production,
-		TracesSampleRate: 1.0,
+	// Get logger for the context of this caddy module instance
+	d.logger = ctx.Logger(d)
+	d.logger.Debug("Provision called")
+
+	// Set up sentry (happens only once)
+	err := initSentry(d.logger)
+	if err != nil {
+		d.logger.Error("initSentry returned error", zap.Error(err))
+		return err
+	}
+	d.usageKeys = append(d.usageKeys, sentryInitUsagePoolKey)
+
+	// Initialize the firestore cache (launches goroutine only once)
+	startTime := time.Now()
+	const collection = "projects"
+	listener, listenerLoaded, err := usagePool.LoadOrNew(projectsListenerUsagePoolKey, func() (caddy.Destructor, error) {
+		d.logger.Info("Creating project listener")
+
+		// FIXME: Create a logger not associated with the caddy module instance
+		logger := d.logger.With(zap.String("context", "projectsListener"))
+
+		listener, err := NewProjectListener(collection, logger)
+		if err != nil {
+			return listener, err
+		}
+
+		d.logger.Info("Starting project listener goroutine")
+		go listener.RunWithRestarts()
+
+		return listener, nil
 	})
 	if err != nil {
-		log.Fatalf("sentry.Init: %s", err)
+		d.logger.Error(
+			"Error loading listener",
+			zap.Bool("loaded", listenerLoaded),
+			zap.Error(err),
+		)
+		return err
 	}
-	// Flush buffered events before the program terminates.
-	defer sentry.Flush(2 * time.Second)
+	d.listener = listener.(*ProjectListener)
+	d.usageKeys = append(d.usageKeys, projectsListenerUsagePoolKey)
 
-	// Initialize the firestore cache
-	var wg sync.WaitGroup
-	d.logger = ctx.Logger(d)
-	d.projectMap = make(map[string]Project)
-	collection := "projects"
-	wg.Add(1)
-	go d.listenMultiple(ctx.Context, collection, &wg, true)
-	wg.Wait()
+	d.logger.Info("Launched projects listener",
+		zap.Bool("loaded", listenerLoaded),
+		zap.Duration("loadTime", time.Since(startTime)),
+		zap.Int("projectCount", d.listener.Count()),
+	)
+
+	// Wait until the listener has fetched all projects at least once,
+	// if this has been called before it should return instantly.
+	err = d.listener.WaitOnFirstSync(ctx.Context)
+	if err != nil {
+		d.logger.Error("listener.WaitOnFirstSync: %s", zap.Error(err))
+		return err
+	}
+
+	d.logger.Debug("Provision done",
+		zap.Duration("loadTime", time.Since(startTime)),
+		zap.Int("projectCount", d.listener.Count()),
+	)
+
+	// Dump all map contents for inspection
+	// d.listener.Dump()
 
 	return nil
 }
 
-var REGION_LOOKUP_MAP = map[string]string{
-	"europe-west1":      "ew",
-	"europe-north1":     "lz",
-	"europe-southwest1": "no",
-	"europe-west9":      "od",
-	"europe-west4":      "ez",
-	"europe-west8":      "oc",
+// Validate implements caddy.Validator.
+//
+// Honestly I'm not sure if there's any benefit
+// to doing things here instead of in Provision.
+func (d *DevxUpstreams) Validate() error {
+	d.logger.Debug("Validate called")
+	return nil
 }
 
-func (d *DevxUpstreams) getUpstreamFromProjectId(projectId string, serviceName string, gcpProjectHash string) string {
-	if project, ok := d.projectMap[projectId]; ok {
-		if regionCode, ok := REGION_LOOKUP_MAP[project.Region]; ok {
-			return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceName, projectId, gcpProjectHash, regionCode)
-		} else {
-			sentry.CaptureMessage("Could not find project in region")
-			return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceName, projectId, gcpProjectHash, "ew")
-		}
-	}
-	sentry.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetLevel(sentry.LevelError)
-		scope.SetTags(map[string]string{
-			"project_id":   projectId,
-			"service_name": serviceName,
+// Cleanup implements caddy.CleanerUpper.
+//
+// Decrements usagePool counters which eventually
+// leads to their destructors being called.
+func (du *DevxUpstreams) Cleanup() error {
+	var allErrors []error
+	for _, key := range du.usageKeys {
+		// Catch panic from Delete in case we have a bug and decrement too many times
+		err := DontPanic(func() error {
+			deleted, err := usagePool.Delete(key)
+			du.logger.Info("Decremented usage counter",
+				zap.String("key", key),
+				zap.Bool("deleted", deleted),
+				zap.Error(err),
+			)
+			return err
 		})
-		sentry.CaptureMessage("Could not find upstream")
-	})
-	return ""
+		allErrors = append(allErrors, err)
+	}
+
+	// Capture shutdown errors to sentry, just so we know if it happens
+	err := errors.Join(allErrors...)
+	if err != nil {
+		sentry.CaptureException(err)
+		du.logger.Warn("Errors during shutdown", zap.Error(err))
+	}
+	return err
 }
 
+// GetUpstreams implements reverseproxy.UpstreamSource.
+//
+// This is what's called for every request.
+// It needs to be threadsafe and fast!
 func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
-	serviceType := r.Header["X-Databutton-Service-Type"]
-	if projectId, ok := r.Header["X-Databutton-Project-Id"]; ok {
-		upstream := d.getUpstreamFromProjectId(projectId[0], serviceType[0], GCP_PROJECT_HASH)
+	projectID := r.Header.Get("X-Databutton-Project-Id")
+	serviceType := r.Header.Get("X-Databutton-Service-Type")
+	upstream := d.listener.LookupUpUrl(projectID, serviceType)
+	if upstream != "" {
+		d.logger.Debug(
+			"Got upstream",
+			zap.String("upstream", upstream),
+			zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+		)
 		return []*reverseproxy.Upstream{
 			{
 				Dial: upstream,
 			},
 		}, nil
 	}
-	sentry.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetLevel(sentry.LevelWarning)
-		sentry.CaptureMessage("Missing X-Databutton-Service-Type or X-Databutton-Project-Id")
-	})
-	return nil, errors.New("missing x-databutton-project-id header")
-}
 
-// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
-func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	return nil
+	var err error
+	switch {
+	case projectID == "":
+		err = ErrProjectHeaderMissing
+	case serviceType == "":
+		err = ErrServiceHeaderMissing
+	default:
+		err = ErrUpstreamNotFound
+	}
+
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelError)
+		scope.SetTag("projectId", projectID)
+		scope.SetTag("serviceType", serviceType)
+		sentry.CaptureException(err)
+	})
+
+	d.logger.Error(
+		"Failed to get upstream",
+		zap.String("projectID", projectID),
+		zap.String("serviceType", serviceType),
+	)
+
+	return nil, err
 }
 
 // Interface guards
 var (
 	_ caddy.Provisioner           = (*DevxUpstreams)(nil)
+	_ caddy.Validator             = (*DevxUpstreams)(nil)
+	_ caddy.CleanerUpper          = (*DevxUpstreams)(nil)
 	_ reverseproxy.UpstreamSource = (*DevxUpstreams)(nil)
 	_ caddyfile.Unmarshaler       = (*DevxUpstreams)(nil)
 )

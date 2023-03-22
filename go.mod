@@ -1,11 +1,12 @@
 module github.com/databutton/data-app-dns-service
 
-go 1.20
+go 1.19
 
 require (
 	cloud.google.com/go/firestore v1.9.0
 	github.com/caddyserver/caddy/v2 v2.6.4
 	github.com/getsentry/sentry-go v0.18.0
+	github.com/pkg/errors v0.9.1
 	go.uber.org/zap v1.24.0
 	google.golang.org/api v0.108.0
 	google.golang.org/grpc v1.52.3
@@ -76,7 +77,6 @@ require (
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/onsi/ginkgo/v2 v2.2.0 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_golang v1.14.0 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.37.0 // indirect

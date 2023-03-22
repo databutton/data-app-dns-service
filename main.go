@@ -13,6 +13,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// Errors
+var (
+	ErrProjectHeaderMissing = errors.New("X-Databutton-Project-Id header missing")
+	ErrServiceHeaderMissing = errors.New("X-Databutton-Service-Type header missing")
+	ErrUpstreamNotFound     = errors.New("Could not find upstream url")
+	ErrInvalidRegion        = errors.New("Invalid region")
+)
+
 // Used to coordinate initialization of dependencies only once
 var usagePool = caddy.NewUsagePool()
 
@@ -207,26 +215,26 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	var err error
 	switch {
 	case projectID == "":
-		err = errors.New("X-Databutton-Project-Id header missing")
+		err = ErrProjectHeaderMissing
 	case serviceType == "":
-		err = errors.New("X-Databutton-Service-Type header missing")
+		err = ErrServiceHeaderMissing
 	default:
-		err = errors.New("Could not find upstream url")
+		err = ErrUpstreamNotFound
 	}
 
 	sentry.WithScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentry.LevelError)
-		scope.SetTags(map[string]string{
-			"project_id":   projectID,
-			"service_type": serviceType,
-		})
+		scope.SetTag("projectId", projectID)
+		scope.SetTag("serviceType", serviceType)
 		sentry.CaptureException(err)
 	})
+
 	d.logger.Error(
 		"Failed to get upstream",
 		zap.String("projectID", projectID),
 		zap.String("serviceType", serviceType),
 	)
+
 	return nil, err
 }
 

@@ -3,12 +3,14 @@ package dataappdnsservice
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/getsentry/sentry-go"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
@@ -29,6 +31,9 @@ func DontPanic(f func() error) (err error) {
 type ProjectDoc struct {
 	Region string `firestore:"region"`
 
+	// These won't exist before after the service is ready,
+	// also we don't want to use them here because they're
+	// within a document writable by the frontend / user.
 	// DevxURL  string `firestore:"devxUrl"`
 	// ProdxURL string `firestore:"prodxUrl"`
 }
@@ -67,13 +72,12 @@ func NewProjectListener(collection string, logger *zap.Logger) (*ProjectListener
 		return nil, fmt.Errorf("collection name is empty")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	client, err := firestore.NewClient(ctx, GCP_PROJECT)
+	client, err := firestore.NewClient(context.Background(), GCP_PROJECT)
 	if err != nil {
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	l := &ProjectListener{
 		collection:      collection,
 		ctx:             ctx,
@@ -142,7 +146,7 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 		if projectData.Region != "" {
 			log.Error("Could not find project region", zap.String("region", projectData.Region))
 			sentry.CaptureMessage("Could not find project region")
-			return fmt.Errorf("Invalid region: %s", projectData.Region)
+			return errors.Wrapf(ErrInvalidRegion, "Region=%s", projectData.Region)
 		}
 
 		// log.Debug("Could not find project region, assuming ew", zap.String("region", projectData.Region))
@@ -288,8 +292,12 @@ func (l *ProjectListener) RunUntilCanceled() error {
 			// Process a single document
 			if err := l.ProcessDoc(ctx, doc); err != nil {
 				// Notify us but keep going if it fails
-				// TODO: add "id":doc.Ref.Id in sentry scope
-				sentry.CaptureException(err)
+				sentry.WithScope(func(scope *sentry.Scope) {
+					scope.SetLevel(sentry.LevelError)
+					scope.SetTag("projectId", doc.Ref.ID)
+					sentry.CaptureException(err)
+				})
+
 				log.Error("ProcessDoc error", zap.Error(err))
 			}
 		}
@@ -297,25 +305,39 @@ func (l *ProjectListener) RunUntilCanceled() error {
 }
 
 func (l *ProjectListener) RunWithRestarts() error {
-	for {
+	// Cheap attempt at a few retries
+	const maxErrors = 3
+	const delayBetweenRetry = time.Millisecond * 200
+	for attempt := 0; attempt < maxErrors; attempt++ {
+		if attempt > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		log := l.logger.With(zap.Int("attempt", attempt))
+
 		l.logger.Info("RunWithRestarts top of loop")
 
+		startTime := time.Now()
 		err := DontPanic(func() error {
 			return l.RunUntilCanceled()
 		})
+		runTime := time.Since(startTime)
+
+		log = log.With(zap.Duration("runTime", runTime))
 
 		// Returns nil for graceful shutdown
 		if err == nil {
-			l.logger.Info("RunWithRestarts graceful shutdown")
+			log.Info("RunWithRestarts graceful shutdown")
 			return nil
 		}
 
 		// Returns error for other cases
-		sentry.CaptureException(err)
-		l.logger.Error("RunWithRestarts got error", zap.Error(err))
-
-		// TODO: Do we want to stay alive here, sleep and circuit break, recreate firestore client? I guess we'll have to learn from prod behaviour...
-		// time.Sleep(100*time.Millisecond)
-		return err
+		sentry.WithScope(func(scope *sentry.Scope) {
+			scope.SetLevel(sentry.LevelError)
+			scope.SetTag("attempt", strconv.Itoa(attempt))
+			scope.SetTag("runTime", runTime.String())
+			sentry.CaptureException(err)
+		})
+		log.Error("RunWithRestarts got error", zap.Error(err))
 	}
 }

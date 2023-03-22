@@ -139,19 +139,18 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	if err != nil {
 		return err
 	}
+	if projectData.Region == "" {
+		// Set fallback region if missing
+		projectData.Region = "europe-west1"
+		log.Debug("Could not find project region, assuming ew", zap.String("region", projectData.Region))
+	}
 
-	// Look up short region code with fallback for migration
+	// Look up short region code and fail if unknown
 	regionCode, ok := REGION_LOOKUP_MAP[projectData.Region]
 	if !ok {
-		if projectData.Region != "" {
-			log.Error("Could not find project region", zap.String("region", projectData.Region))
-			sentry.CaptureMessage("Could not find project region")
-			return errors.Wrapf(ErrInvalidRegion, "Region=%s", projectData.Region)
-		}
-
-		// log.Debug("Could not find project region, assuming ew", zap.String("region", projectData.Region))
-		sentry.CaptureMessage("Could not find project region, assuming ew")
-		regionCode = "ew"
+		log.Error("Could not find project region", zap.String("region", projectData.Region))
+		sentry.CaptureMessage("Could not find project region")
+		return errors.Wrapf(ErrInvalidRegion, "Region=%s", projectData.Region)
 	}
 
 	devxUrl := fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", "devx", projectID, GCP_PROJECT_HASH, regionCode)
@@ -251,7 +250,6 @@ func (l *ProjectListener) RunUntilCanceled() error {
 	log.Info("Starting query")
 	it := col.Where("markedForDeletionAt", "==", nil).Snapshots(ctx)
 	for {
-		log.Debug("Next snapshot")
 		snap, err := it.Next()
 
 		if status.Code(err) == codes.Canceled {
@@ -266,14 +264,14 @@ func (l *ProjectListener) RunUntilCanceled() error {
 			return err
 		}
 
+		docCount := 0
 		for {
-			// log.Debug("Next document")
+			docCount++
 			doc, err := snap.Documents.Next()
 
 			if err == iterator.Done {
 				// Notify the provisioner that we've done the first sync.
 				if initial {
-					// log.Debug("First sync complete")
 					l.notifyFirstSync()
 					initial = false
 				}
@@ -301,6 +299,7 @@ func (l *ProjectListener) RunUntilCanceled() error {
 				log.Error("ProcessDoc error", zap.Error(err))
 			}
 		}
+		log.Debug("Processed documents in snapshot", zap.Int("documents", docCount))
 	}
 }
 

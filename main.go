@@ -217,6 +217,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
 	if upstream != "" {
+		// TODO: Remove this if we want to reduce log volume
 		d.logger.Debug(
 			"Got upstream",
 			zap.String("upstream", upstream),

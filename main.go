@@ -195,11 +195,15 @@ func (du *DevxUpstreams) Cleanup() error {
 	}
 
 	// Capture shutdown errors to sentry, just so we know if it happens
-	err := errors.Join(allErrors...)
-	if err != nil {
-		sentry.CaptureException(err)
-		du.logger.Warn("Errors during shutdown", zap.Error(err))
+	// err := errors.Join(allErrors...)
+	if len(allErrors) == 0 {
+		return nil
 	}
+
+	// Just pick one
+	err := allErrors[0]
+	sentry.CaptureException(err)
+	du.logger.Warn("Errors during shutdown", zap.Error(err))
 	return err
 }
 

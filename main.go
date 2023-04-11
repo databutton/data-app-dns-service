@@ -90,7 +90,7 @@ func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	// Get logger for the context of this caddy module instance
 	d.logger = ctx.Logger(d)
-	d.logger.Debug("Provision called")
+	d.logger.Info("Provision called")
 
 	// Set up sentry (happens only once)
 	err := initSentry(d.logger)
@@ -154,7 +154,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		return err
 	}
 
-	d.logger.Debug("Provision done",
+	d.logger.Info("Provision done",
 		zap.Duration("loadTime", time.Since(startTime)),
 		zap.Int("projectCount", d.listener.Count()),
 	)
@@ -170,7 +170,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 // Honestly I'm not sure if there's any benefit
 // to doing things here instead of in Provision.
 func (d *DevxUpstreams) Validate() error {
-	d.logger.Debug("Validate called")
+	d.logger.Info("Validate called")
 	return nil
 }
 
@@ -217,7 +217,6 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
 	if upstream != "" {
-		// TODO: Remove this if we want to reduce log volume
 		d.logger.Debug(
 			"Got upstream",
 			zap.String("upstream", upstream),

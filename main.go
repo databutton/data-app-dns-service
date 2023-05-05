@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -102,22 +103,24 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 
 	// Initialize the firestore cache (launches goroutine only once)
 	startTime := time.Now()
-	const collection = "projects"
 	listener, listenerLoaded, err := usagePool.LoadOrNew(projectsListenerUsagePoolKey, func() (caddy.Destructor, error) {
 		d.logger.Info("Creating project listener")
 
 		// FIXME: Create a logger not associated with the caddy module instance
 		logger := d.logger.With(zap.String("context", "projectsListener"))
 
-		listener, err := NewProjectListener(collection, logger)
+		listener, err := NewProjectListener(logger)
 		if err != nil {
 			return listener, err
 		}
 
-		d.logger.Info("Starting project listener goroutine")
+		logger.Info("Starting fleet listener goroutine")
+		startTime := time.Now()
+		fleetsInitWg := new(sync.WaitGroup)
+		fleetsInitWg.Add(1)
 		go func() {
 			// This should run forever
-			err := listener.RunWithRestarts()
+			err := listener.RunWithRestarts(collectionFleets, fleetsInitWg)
 
 			// Panic in a goroutine kills the program abruptly,
 			// do that unless we were canceled. Perhaps there
@@ -126,6 +129,34 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 				panic(err)
 			}
 		}()
+		fleetsInitWg.Wait()
+		initialSyncTime := time.Since(startTime)
+		logger.Info("Fleets listener first sync completed",
+			zap.Duration("loadTime", initialSyncTime),
+			zap.Int("upstreamsCount", listener.Count()),
+		)
+
+		logger.Info("Starting project listener goroutine")
+		startTime = time.Now()
+		projectsInitWg := new(sync.WaitGroup)
+		projectsInitWg.Add(1)
+		go func() {
+			// This should run forever
+			err := listener.RunWithRestarts(collectionProjects, projectsInitWg)
+
+			// Panic in a goroutine kills the program abruptly,
+			// do that unless we were canceled. Perhaps there
+			// is a nicer way to shut down caddy, we'll see in prod...
+			if !errors.Is(listener.ctx.Err(), context.Canceled) {
+				panic(err)
+			}
+		}()
+		projectsInitWg.Wait()
+		initialSyncTime = time.Since(startTime)
+		logger.Info("Launched projects listener",
+			zap.Duration("loadTime", initialSyncTime),
+			zap.Int("upstreamsCount", listener.Count()),
+		)
 
 		return listener, nil
 	})
@@ -135,28 +166,15 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			zap.Bool("loaded", listenerLoaded),
 			zap.Error(err),
 		)
+		sentry.CaptureException(err)
 		return err
 	}
 	d.listener = listener.(*ProjectListener)
 	d.usageKeys = append(d.usageKeys, projectsListenerUsagePoolKey)
 
-	d.logger.Info("Launched projects listener",
-		zap.Bool("loaded", listenerLoaded),
-		zap.Duration("loadTime", time.Since(startTime)),
-		zap.Int("projectCount", d.listener.Count()),
-	)
-
-	// Wait until the listener has fetched all projects at least once,
-	// if this has been called before it should return instantly.
-	err = d.listener.WaitOnFirstSync(ctx.Context)
-	if err != nil {
-		d.logger.Error("listener.WaitOnFirstSync: %s", zap.Error(err))
-		return err
-	}
-
 	d.logger.Info("Provision done",
 		zap.Duration("loadTime", time.Since(startTime)),
-		zap.Int("projectCount", d.listener.Count()),
+		zap.Int("upstreamsCount", d.listener.Count()),
 	)
 
 	// Dump all map contents for inspection

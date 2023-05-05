@@ -1,6 +1,5 @@
 {
 	order request_id before header
-	debug
 }
 
 (cors) {

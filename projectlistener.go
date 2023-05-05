@@ -3,7 +3,6 @@ package dataappdnsservice
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
@@ -27,15 +26,24 @@ func DontPanic(f func() error) (err error) {
 	return
 }
 
-// Partial document to be parsed from firestore document
-type ProjectDoc struct {
-	Region string `firestore:"region"`
+const (
+	collectionProjects = "projects"
+	collectionFleets   = "fleets"
+)
 
-	// These won't exist before after the service is ready,
-	// also we don't want to use them here because they're
-	// within a document writable by the frontend / user.
-	// DevxURL  string `firestore:"devxUrl"`
-	// ProdxURL string `firestore:"prodxUrl"`
+// Partial Project document to be parsed from firestore document
+type ProjectDoc struct {
+	// Legacy projects will have the region here
+	Region string `firestore:"region,omitempty"`
+
+	// New projects will have a fleetId
+	FleetId string `firestore:"fleetId,omitempty"`
+}
+
+// Partial Fleet document to be parsed from firestore document
+type FleetDoc struct {
+	ProjectId string `firestore:"projectId"`
+	Region    string `firestore:"region"`
 }
 
 type CloudRunService struct {
@@ -55,23 +63,28 @@ type Project struct {
 	Prodx      CloudRunService
 }
 
-type ProjectListener struct {
-	collection      string
-	firestoreClient *firestore.Client
-	projectMap      sync.Map
-	upstreamMap     sync.Map
-	wgDoneOnce      sync.Once
-	wg              sync.WaitGroup
-	ctx             context.Context
-	cancel          context.CancelFunc
-	logger          *zap.Logger
+// Cached fleet document
+type Fleet struct {
+	FleetDoc
+
+	FleetID string
+
+	RegionCode string
+	Devx       CloudRunService
+	Prodx      CloudRunService
 }
 
-func NewProjectListener(collection string, logger *zap.Logger) (*ProjectListener, error) {
-	if collection == "" {
-		return nil, fmt.Errorf("collection name is empty")
-	}
+type ProjectListener struct {
+	firestoreClient *firestore.Client
 
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger *zap.Logger
+
+	upstreamMap sync.Map
+}
+
+func NewProjectListener(logger *zap.Logger) (*ProjectListener, error) {
 	client, err := firestore.NewClient(context.Background(), GCP_PROJECT)
 	if err != nil {
 		return nil, err
@@ -79,15 +92,11 @@ func NewProjectListener(collection string, logger *zap.Logger) (*ProjectListener
 
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &ProjectListener{
-		collection:      collection,
 		ctx:             ctx,
 		cancel:          cancel,
 		firestoreClient: client,
 		logger:          logger,
 	}
-
-	// This blocks WaitOnFirstSync() until wg.Done() is called
-	l.wg.Add(1)
 
 	return l, nil
 }
@@ -108,92 +117,103 @@ func (l *ProjectListener) Destruct() error {
 
 var _ caddy.Destructor = (*ProjectListener)(nil)
 
-// Wait until first sync has happened
-func (l *ProjectListener) WaitOnFirstSync(ctx context.Context) error {
-	l.logger.Info("Waiting on first sync")
-	l.wg.Wait()
-	l.logger.Info("Done waiting on first sync")
-	return nil
-}
-
-// Notify that first sync has happened
-func (l *ProjectListener) notifyFirstSync() error {
-	// wg.Done() panics if it's called more than once per wg.Add(1)
-	// and this will be called repeatedly
-	l.wgDoneOnce.Do(func() {
-		l.wg.Done()
-		l.logger.Info("Initial sync complete!")
-	})
-	return nil
+func (l *ProjectListener) MakeServiceUrl(serviceType, fleetId, regionCode string) string {
+	return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceType, fleetId, GCP_PROJECT_HASH, regionCode)
 }
 
 func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
-	projectID := doc.Ref.ID
-
-	log := l.logger.With(zap.String("id", projectID))
-	// log.Debug("Processing")
-
-	// Parse document
-	var projectData ProjectDoc
-	err := doc.DataTo(&projectData)
-	if err != nil {
+	switch collection := doc.Ref.Parent.ID; collection {
+	case collectionProjects:
+		return l.ProcessProjectDoc(ctx, doc)
+	case collectionFleets:
+		return l.ProcessFleetDoc(ctx, doc)
+	default:
+		err := fmt.Errorf("Unexpected collection %s", collection)
+		sentry.CaptureException(err)
 		return err
 	}
-	if projectData.Region == "" {
-		// Set fallback region if missing
-		projectData.Region = "europe-west1"
-		log.Debug("Could not find project region, assuming ew", zap.String("region", projectData.Region))
+}
+
+func (l *ProjectListener) ProcessFleetDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
+	// Parse partial fleet document
+	var data FleetDoc
+	if err := doc.DataTo(&data); err != nil {
+		return err
+	}
+
+	fleetID := doc.Ref.ID
+
+	// Hacky workaround for temporary race condition:
+	// Overwrite upstreams even though it's already there, such that we
+	// overwrite a /projects version and this /fleets version wins eventually.
+	overwrite := true
+
+	return l.StoreUpstream(data.ProjectId, fleetID, data.Region, overwrite)
+}
+
+func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
+	// Parse partial project document
+	var data ProjectDoc
+	if err := doc.DataTo(&data); err != nil {
+		return err
+	}
+
+	// If there's a fleet, let ProcessFleetDoc do the work
+	// Note: Before we migrate everything to fleets, this is racy,
+	// as the fleetId won't be set on initial project creation.
+	// See the overwrite parameter for a quick and dirty workaround.
+	// During the race period, we may route a project url request to
+	// a cloud run service that doesn't exist, but only for a short period.
+	if data.FleetId != "" {
+		return nil
+	}
+
+	// For legacy projects without a fleet entry, the service name is
+	// based on the projectId so we just define fleetId == projectId
+	// (eventually we can migrate all projects to have a fleet entry using the same definition)
+	projectID := doc.Ref.ID
+	fleetID := projectID
+
+	// Hacky workaround for temporary race condition:
+	// Populate upstreams from /projects if it's not already there,
+	// but avoid overwriting so we know the /fleets version wins eventually.
+	overwrite := false
+
+	return l.StoreUpstream(projectID, fleetID, data.Region, overwrite)
+}
+
+func (l *ProjectListener) StoreUpstream(projectID, fleetID, region string, overwrite bool) error {
+	log := l.logger.With(
+		zap.String("projectId", projectID),
+		zap.String("fleetId", fleetID),
+		zap.String("region", region),
+	)
+
+	// Set fallback region if missing, for projects before we added multiregion
+	if region == "" {
+		region = "europe-west1"
 	}
 
 	// Look up short region code and fail if unknown
-	regionCode, ok := REGION_LOOKUP_MAP[projectData.Region]
+	regionCode, ok := REGION_LOOKUP_MAP[region]
 	if !ok {
-		log.Error("Could not find project region", zap.String("region", projectData.Region))
-		sentry.CaptureMessage("Could not find project region")
-		return errors.Wrapf(ErrInvalidRegion, "Region=%s", projectData.Region)
+		log.Error("Could not find project region", zap.String("region", region))
+		sentry.CaptureMessage(fmt.Sprintf("Could not find project region %s", region))
+		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
 
-	devxUrl := fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", "devx", projectID, GCP_PROJECT_HASH, regionCode)
-	prodxUrl := fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", "prodx", projectID, GCP_PROJECT_HASH, regionCode)
-
-	// We don't really need all this at the moment,
-	// but I think we want to extend this for use in authorization
-	project := Project{
-		ProjectDoc: projectData,
-		ProjectID:  projectID,
-		RegionCode: regionCode,
-		Devx: CloudRunService{
-			Name:   "devx",
-			Region: regionCode,
-			Url:    devxUrl,
-		},
-		Prodx: CloudRunService{
-			Name:   "prodx",
-			Region: regionCode,
-			Url:    prodxUrl,
-		},
+	// Write to threadsafe map optimized for direct lookup of upstream url from (serviceType+projectID)
+	for _, serviceType := range []string{"devx", "prodx"} {
+		key := serviceType + projectID
+		url := l.MakeServiceUrl(serviceType, fleetID, regionCode)
+		if overwrite {
+			l.upstreamMap.Store(key, url)
+		} else {
+			_, _ = l.upstreamMap.LoadOrStore(key, url)
+		}
 	}
-
-	// Write to threadsafe map
-	l.projectMap.Store(projectID, project)
-
-	// Optimization for direct lookup
-	l.upstreamMap.Store("devx"+projectID, devxUrl)
-	l.upstreamMap.Store("prodx"+projectID, prodxUrl)
-
-	// log.Debug("Done processing")
 
 	return nil
-}
-
-// Re-entrant project cache lookup
-func (l *ProjectListener) LookupProject(projectID string) (Project, bool) {
-	value, ok := l.projectMap.Load(projectID)
-	if !ok {
-		return Project{}, false
-	}
-	project, ok := value.(Project)
-	return project, ok
 }
 
 // Re-entrant optimized cache lookup for the upstream url only
@@ -205,10 +225,10 @@ func (l *ProjectListener) LookupUpUrl(projectID, serviceType string) string {
 	return value.(string)
 }
 
-// Count how many projects are in the cache
+// Count how many upstreams are in the cache
 func (l *ProjectListener) Count() int {
 	n := 0
-	l.projectMap.Range(
+	l.upstreamMap.Range(
 		func(key, value any) bool {
 			n += 1
 			return true
@@ -236,19 +256,18 @@ func (l *ProjectListener) Dump() {
 }
 
 // TODO: Update this to also delete projects (although deleted projects will be gone on a restart so not critical for a long time)
-func (l *ProjectListener) RunUntilCanceled() error {
+func (l *ProjectListener) RunUntilCanceled(collection string, initWg *sync.WaitGroup) error {
 	ctx := l.ctx
-	log := l.logger
+	log := l.logger.With(zap.String("collection", collection))
 
-	col := l.firestoreClient.Collection(l.collection)
+	col := l.firestoreClient.Collection(collection)
 	if col == nil {
-		return fmt.Errorf("Could not get collection %s", l.collection)
+		return fmt.Errorf("Could not get collection %s", collection)
 	}
-
-	initial := true
 
 	log.Info("Starting query")
 	it := col.Where("markedForDeletionAt", "==", nil).Snapshots(ctx)
+
 	for {
 		snap, err := it.Next()
 
@@ -271,9 +290,9 @@ func (l *ProjectListener) RunUntilCanceled() error {
 
 			if err == iterator.Done {
 				// Notify the provisioner that we've done the first sync.
-				if initial {
-					l.notifyFirstSync()
-					initial = false
+				if initWg != nil {
+					initWg.Done()
+					initWg = nil
 				}
 
 				// Once we get Done from Next we'll always get Done.
@@ -292,7 +311,7 @@ func (l *ProjectListener) RunUntilCanceled() error {
 				// Notify us but keep going if it fails
 				sentry.WithScope(func(scope *sentry.Scope) {
 					scope.SetLevel(sentry.LevelError)
-					scope.SetTag("projectId", doc.Ref.ID)
+					scope.SetTag("id", doc.Ref.ID)
 					sentry.CaptureException(err)
 				})
 
@@ -303,43 +322,31 @@ func (l *ProjectListener) RunUntilCanceled() error {
 	}
 }
 
-func (l *ProjectListener) RunWithRestarts() error {
-	// Cheap attempt at a few retries
-	const maxErrors = 3
-	const delayBetweenRetry = time.Millisecond * 200
-	var lastError error
-	for attempt := 0; attempt < maxErrors; attempt++ {
-		if attempt > 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
+func (l *ProjectListener) RunWithRestarts(collection string, initWg *sync.WaitGroup) error {
+	log := l.logger.With(zap.String("collection", collection))
 
-		log := l.logger.With(zap.Int("attempt", attempt))
+	log.Info("Firestore listener starting")
 
-		l.logger.Info("RunWithRestarts top of loop")
+	startTime := time.Now()
+	err := DontPanic(func() error {
+		return l.RunUntilCanceled(collection, initWg)
+	})
+	runTime := time.Since(startTime)
 
-		startTime := time.Now()
-		err := DontPanic(func() error {
-			return l.RunUntilCanceled()
-		})
-		runTime := time.Since(startTime)
+	log = log.With(zap.Duration("runTime", runTime))
 
-		log = log.With(zap.Duration("runTime", runTime))
-
-		// Returns nil for graceful shutdown
-		if err == nil {
-			log.Info("RunWithRestarts graceful shutdown")
-			return nil
-		}
-
-		// Returns error for other cases
+	if err != nil {
 		sentry.WithScope(func(scope *sentry.Scope) {
 			scope.SetLevel(sentry.LevelError)
-			scope.SetTag("attempt", strconv.Itoa(attempt))
+			scope.SetTag("collection", collection)
 			scope.SetTag("runTime", runTime.String())
 			sentry.CaptureException(err)
 		})
-		log.Error("RunWithRestarts got error", zap.Error(err))
-		lastError = err
+		log.Error("Firestore listener returned error", zap.Error(err))
+		return err
 	}
-	return lastError
+
+	// Returns nil for graceful shutdown
+	log.Info("Firestore listener graceful shutdown")
+	return nil
 }

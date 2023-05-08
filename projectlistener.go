@@ -38,6 +38,10 @@ type ProjectDoc struct {
 
 	// New projects will have a fleetId
 	FleetId string `firestore:"fleetId,omitempty"`
+
+	// During a migration period, new projects will need to set
+	// this on creation to use fleets for service creation
+	HasFleet bool `firestore:"hasFleet,omitempty"`
 }
 
 // Partial Fleet document to be parsed from firestore document
@@ -143,12 +147,7 @@ func (l *ProjectListener) ProcessFleetDoc(ctx context.Context, doc *firestore.Do
 
 	fleetID := doc.Ref.ID
 
-	// Hacky workaround for temporary race condition:
-	// Overwrite upstreams even though it's already there, such that we
-	// overwrite a /projects version and this /fleets version wins eventually.
-	overwrite := true
-
-	return l.StoreUpstream(data.ProjectId, fleetID, data.Region, overwrite)
+	return l.StoreUpstream(data.ProjectId, fleetID, data.Region)
 }
 
 func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
@@ -158,13 +157,13 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		return err
 	}
 
-	// If there's a fleet, let ProcessFleetDoc do the work
-	// Note: Before we migrate everything to fleets, this is racy,
-	// as the fleetId won't be set on initial project creation.
-	// See the overwrite parameter for a quick and dirty workaround.
-	// During the race period, we may route a project url request to
-	// a cloud run service that doesn't exist, but only for a short period.
-	if data.FleetId != "" {
+	// If this project has or will have an associated fleet, delegate to ProcessFleetDoc.
+	if data.HasFleet {
+		l.logger.Debug(
+			"Skipping project doc to use fleet doc instead",
+			zap.String("projectId", doc.Ref.ID),
+			zap.String("fleetId", data.FleetId),
+		)
 		return nil
 	}
 
@@ -174,24 +173,27 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	projectID := doc.Ref.ID
 	fleetID := projectID
 
-	// Hacky workaround for temporary race condition:
-	// Populate upstreams from /projects if it's not already there,
-	// but avoid overwriting so we know the /fleets version wins eventually.
-	overwrite := false
+	// Set fallback region if missing, for projects before we added multiregion
+	region := data.Region
+	if region == "" {
+		region = "europe-west1"
+	}
 
-	return l.StoreUpstream(projectID, fleetID, data.Region, overwrite)
+	return l.StoreUpstream(projectID, fleetID, region)
 }
 
-func (l *ProjectListener) StoreUpstream(projectID, fleetID, region string, overwrite bool) error {
+func (l *ProjectListener) StoreUpstream(projectID, fleetID, region string) error {
 	log := l.logger.With(
 		zap.String("projectId", projectID),
 		zap.String("fleetId", fleetID),
 		zap.String("region", region),
 	)
 
-	// Set fallback region if missing, for projects before we added multiregion
+	// This should never happen here
 	if region == "" {
-		region = "europe-west1"
+		log.Error("Missing region in StoreUpstream")
+		sentry.CaptureMessage("Missing region in StoreUpstream")
+		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
 
 	// Look up short region code and fail if unknown
@@ -206,11 +208,9 @@ func (l *ProjectListener) StoreUpstream(projectID, fleetID, region string, overw
 	for _, serviceType := range []string{"devx", "prodx"} {
 		key := serviceType + projectID
 		url := l.MakeServiceUrl(serviceType, fleetID, regionCode)
-		if overwrite {
-			l.upstreamMap.Store(key, url)
-		} else {
-			_, _ = l.upstreamMap.LoadOrStore(key, url)
-		}
+		// Note: When we've migrated to fleets, we'll always have a region and can use this only once instead:
+		// _, _ = l.upstreamMap.LoadOrStore(key, url)
+		l.upstreamMap.Store(key, url)
 	}
 
 	return nil

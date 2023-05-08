@@ -235,6 +235,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
 	if upstream != "" {
+		// We should probably remove this, it's very noisy. Keeping it for now.
 		d.logger.Debug(
 			"Got upstream",
 			zap.String("upstream", upstream),

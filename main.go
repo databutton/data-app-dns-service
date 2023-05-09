@@ -114,13 +114,13 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			return listener, err
 		}
 
-		logger.Info("Starting fleet listener goroutine")
+		logger.Info("Starting appbutler listener goroutine")
 		startTime := time.Now()
-		fleetsInitWg := new(sync.WaitGroup)
-		fleetsInitWg.Add(1)
+		appbutlersInitWg := new(sync.WaitGroup)
+		appbutlersInitWg.Add(1)
 		go func() {
 			// This should run forever
-			err := listener.RunWithRestarts(collectionFleets, fleetsInitWg)
+			err := listener.RunWithRestarts(collectionAppbutlers, appbutlersInitWg)
 
 			// Panic in a goroutine kills the program abruptly,
 			// do that unless we were canceled. Perhaps there
@@ -129,9 +129,9 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 				panic(err)
 			}
 		}()
-		fleetsInitWg.Wait()
+		appbutlersInitWg.Wait()
 		initialSyncTime := time.Since(startTime)
-		logger.Info("Fleets listener first sync completed",
+		logger.Info("Appbutlers listener first sync completed",
 			zap.Duration("loadTime", initialSyncTime),
 			zap.Int("upstreamsCount", listener.Count()),
 		)

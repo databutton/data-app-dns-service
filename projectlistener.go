@@ -27,8 +27,8 @@ func DontPanic(f func() error) (err error) {
 }
 
 const (
-	collectionProjects = "projects"
-	collectionFleets   = "fleets"
+	collectionProjects   = "projects"
+	collectionAppbutlers = "appbutlers"
 )
 
 // Partial Project document to be parsed from firestore document
@@ -36,16 +36,16 @@ type ProjectDoc struct {
 	// Legacy projects will have the region here
 	Region string `firestore:"region,omitempty"`
 
-	// New projects will have a fleetId
-	FleetId string `firestore:"fleetId,omitempty"`
+	// New projects will have a appbutlerId
+	AppbutlerId string `firestore:"appbutlerId,omitempty"`
 
 	// During a migration period, new projects will need to set
-	// this on creation to use fleets for service creation
-	HasFleet bool `firestore:"hasFleet,omitempty"`
+	// this on creation to use appbutlers for service creation
+	HasAppbutler bool `firestore:"hasAppbutler,omitempty"`
 }
 
-// Partial Fleet document to be parsed from firestore document
-type FleetDoc struct {
+// Partial Appbutler document to be parsed from firestore document
+type AppbutlerDoc struct {
 	ProjectId string `firestore:"projectId"`
 	Region    string `firestore:"region"`
 }
@@ -67,11 +67,11 @@ type Project struct {
 	Prodx      CloudRunService
 }
 
-// Cached fleet document
-type Fleet struct {
-	FleetDoc
+// Cached appbutler document
+type Appbutler struct {
+	AppbutlerDoc
 
-	FleetID string
+	AppbutlerID string
 
 	RegionCode string
 	Devx       CloudRunService
@@ -121,16 +121,16 @@ func (l *ProjectListener) Destruct() error {
 
 var _ caddy.Destructor = (*ProjectListener)(nil)
 
-func (l *ProjectListener) MakeServiceUrl(serviceType, fleetId, regionCode string) string {
-	return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceType, fleetId, GCP_PROJECT_HASH, regionCode)
+func (l *ProjectListener) MakeServiceUrl(serviceType, appbutlerId, regionCode string) string {
+	return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceType, appbutlerId, GCP_PROJECT_HASH, regionCode)
 }
 
 func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
 	switch collection := doc.Ref.Parent.ID; collection {
 	case collectionProjects:
 		return l.ProcessProjectDoc(ctx, doc)
-	case collectionFleets:
-		return l.ProcessFleetDoc(ctx, doc)
+	case collectionAppbutlers:
+		return l.ProcessAppbutlerDoc(ctx, doc)
 	default:
 		err := fmt.Errorf("Unexpected collection %s", collection)
 		sentry.CaptureException(err)
@@ -138,16 +138,16 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	}
 }
 
-func (l *ProjectListener) ProcessFleetDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
-	// Parse partial fleet document
-	var data FleetDoc
+func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
+	// Parse partial appbutler document
+	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
 		return err
 	}
 
-	fleetID := doc.Ref.ID
+	appbutlerID := doc.Ref.ID
 
-	return l.StoreUpstream(data.ProjectId, fleetID, data.Region)
+	return l.StoreUpstream(data.ProjectId, appbutlerID, data.Region)
 }
 
 func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
@@ -157,21 +157,21 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		return err
 	}
 
-	// If this project has or will have an associated fleet, delegate to ProcessFleetDoc.
-	if data.HasFleet {
+	// If this project has or will have an associated appbutler, delegate to ProcessAppbutlerDoc.
+	if data.HasAppbutler {
 		l.logger.Debug(
-			"Skipping project doc to use fleet doc instead",
+			"Skipping project doc to use appbutler doc instead",
 			zap.String("projectId", doc.Ref.ID),
-			zap.String("fleetId", data.FleetId),
+			zap.String("appbutlerId", data.AppbutlerId),
 		)
 		return nil
 	}
 
-	// For legacy projects without a fleet entry, the service name is
-	// based on the projectId so we just define fleetId == projectId
-	// (eventually we can migrate all projects to have a fleet entry using the same definition)
+	// For legacy projects without a appbutler entry, the service name is
+	// based on the projectId so we just define appbutlerId == projectId
+	// (eventually we can migrate all projects to have a appbutler entry using the same definition)
 	projectID := doc.Ref.ID
-	fleetID := projectID
+	appbutlerID := projectID
 
 	// Set fallback region if missing, for projects before we added multiregion
 	region := data.Region
@@ -179,13 +179,13 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		region = "europe-west1"
 	}
 
-	return l.StoreUpstream(projectID, fleetID, region)
+	return l.StoreUpstream(projectID, appbutlerID, region)
 }
 
-func (l *ProjectListener) StoreUpstream(projectID, fleetID, region string) error {
+func (l *ProjectListener) StoreUpstream(projectID, appbutlerID, region string) error {
 	log := l.logger.With(
 		zap.String("projectId", projectID),
-		zap.String("fleetId", fleetID),
+		zap.String("appbutlerId", appbutlerID),
 		zap.String("region", region),
 	)
 
@@ -207,8 +207,8 @@ func (l *ProjectListener) StoreUpstream(projectID, fleetID, region string) error
 	// Write to threadsafe map optimized for direct lookup of upstream url from (serviceType+projectID)
 	for _, serviceType := range []string{"devx", "prodx"} {
 		key := serviceType + projectID
-		url := l.MakeServiceUrl(serviceType, fleetID, regionCode)
-		// Note: When we've migrated to fleets, we'll always have a region and can use this only once instead:
+		url := l.MakeServiceUrl(serviceType, appbutlerID, regionCode)
+		// Note: When we've migrated to appbutlers, we'll always have a region and can use this only once instead:
 		// _, _ = l.upstreamMap.LoadOrStore(key, url)
 		l.upstreamMap.Store(key, url)
 	}

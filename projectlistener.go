@@ -41,7 +41,7 @@ type ProjectDoc struct {
 
 	// During a migration period, new projects will need to set
 	// this on creation to use appbutlers for service creation
-	HasAppbutler bool `firestore:"hasAppbutler,omitempty"`
+	EnableAppbutlers bool `firestore:"enableAppbutlers,omitempty"`
 }
 
 // Partial Appbutler document to be parsed from firestore document
@@ -158,7 +158,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	}
 
 	// If this project has or will have an associated appbutler, delegate to ProcessAppbutlerDoc.
-	if data.HasAppbutler {
+	if data.EnableAppbutlers {
 		l.logger.Debug(
 			"Skipping project doc to use appbutler doc instead",
 			zap.String("projectId", doc.Ref.ID),

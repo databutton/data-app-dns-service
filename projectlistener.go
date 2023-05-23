@@ -48,36 +48,7 @@ type ProjectDoc struct {
 type AppbutlerDoc struct {
 	ProjectId   string `firestore:"projectId"`
 	ServiceType string `firestore:"serviceType"`
-	Region      string `firestore:"region"`
 	RegionCode  string `firestore:"regionCode"`
-}
-
-type CloudRunService struct {
-	Name   string
-	Region string
-	Url    string
-}
-
-// Cached project document
-type Project struct {
-	ProjectDoc
-
-	ProjectID string
-
-	RegionCode string
-	Devx       CloudRunService
-	Prodx      CloudRunService
-}
-
-// Cached appbutler document
-type Appbutler struct {
-	AppbutlerDoc
-
-	AppbutlerID string
-
-	RegionCode string
-	Devx       CloudRunService
-	Prodx      CloudRunService
 }
 
 type ProjectListener struct {

@@ -10,6 +10,7 @@ const (
 	SENTRY_TRACES_SAMPLE_RATE = 0.05
 )
 
+// TODO: After migrating to appbutlers we can get rid of this
 var REGION_LOOKUP_MAP = map[string]string{
 	"europe-west1":      "ew",
 	"europe-north1":     "lz",

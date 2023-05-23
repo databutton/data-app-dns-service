@@ -46,8 +46,10 @@ type ProjectDoc struct {
 
 // Partial Appbutler document to be parsed from firestore document
 type AppbutlerDoc struct {
-	ProjectId string `firestore:"projectId"`
-	Region    string `firestore:"region"`
+	ProjectId   string `firestore:"projectId"`
+	ServiceType string `firestore:"serviceType"`
+	Region      string `firestore:"region"`
+	RegionCode  string `firestore:"regionCode"`
 }
 
 type CloudRunService struct {
@@ -147,7 +149,7 @@ func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestor
 
 	appbutlerID := doc.Ref.ID
 
-	return l.StoreUpstream(data.ProjectId, appbutlerID, data.Region)
+	return l.StoreUpstream(data.ServiceType, data.ProjectId, appbutlerID, data.RegionCode)
 }
 
 func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
@@ -179,39 +181,43 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		region = "europe-west1"
 	}
 
-	return l.StoreUpstream(projectID, appbutlerID, region)
-}
-
-func (l *ProjectListener) StoreUpstream(projectID, appbutlerID, region string) error {
-	log := l.logger.With(
-		zap.String("projectId", projectID),
-		zap.String("appbutlerId", appbutlerID),
-		zap.String("region", region),
-	)
-
-	// This should never happen here
-	if region == "" {
-		log.Error("Missing region in StoreUpstream")
-		sentry.CaptureMessage("Missing region in StoreUpstream")
-		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
-	}
-
 	// Look up short region code and fail if unknown
 	regionCode, ok := REGION_LOOKUP_MAP[region]
 	if !ok {
-		log.Error("Could not find project region", zap.String("region", region))
+		l.logger.Error("Could not find project region", zap.String("region", region))
 		sentry.CaptureMessage(fmt.Sprintf("Could not find project region %s", region))
 		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
 
-	// Write to threadsafe map optimized for direct lookup of upstream url from (serviceType+projectID)
-	for _, serviceType := range []string{"devx", "prodx"} {
-		key := serviceType + projectID
-		url := l.MakeServiceUrl(serviceType, appbutlerID, regionCode)
-		// Note: When we've migrated to appbutlers, we'll always have a region and can use this only once instead:
-		// _, _ = l.upstreamMap.LoadOrStore(key, url)
-		l.upstreamMap.Store(key, url)
+	err := l.StoreUpstream("devx", projectID, appbutlerID, regionCode)
+	if err != nil {
+		return err
 	}
+	return l.StoreUpstream("prodx", projectID, appbutlerID, regionCode)
+}
+
+func (l *ProjectListener) StoreUpstream(serviceType, projectID, appbutlerID, regionCode string) error {
+	log := l.logger.With(
+		zap.String("serviceType", serviceType),
+		zap.String("projectId", projectID),
+		zap.String("appbutlerId", appbutlerID),
+		zap.String("region", regionCode),
+	)
+
+	// This should never happen here
+	if regionCode == "" {
+		log.Error("Missing region in StoreUpstream")
+		sentry.CaptureMessage("Missing region in StoreUpstream")
+		return errors.Wrapf(ErrInvalidRegion, "Region=%s", regionCode)
+	}
+
+	// Write to threadsafe map optimized for direct lookup of upstream url from (serviceType+projectID)
+	key := serviceType + projectID
+	url := l.MakeServiceUrl(serviceType, appbutlerID, regionCode)
+
+	// Note: When we've migrated to appbutlers, we'll always have a region and can use this only once instead:
+	// _, _ = l.upstreamMap.LoadOrStore(key, url)
+	l.upstreamMap.Store(key, url)
 
 	return nil
 }

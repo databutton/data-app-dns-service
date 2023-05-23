@@ -36,9 +36,6 @@ type ProjectDoc struct {
 	// Legacy projects will have the region here
 	Region string `firestore:"region,omitempty"`
 
-	// New projects will have a appbutlerId
-	AppbutlerId string `firestore:"appbutlerId,omitempty"`
-
 	// During a migration period, new projects will need to set
 	// this on creation to use appbutlers for service creation
 	EnableAppbutlers bool `firestore:"enableAppbutlers,omitempty"`
@@ -112,15 +109,42 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 }
 
 func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
+	appbutlerID := doc.Ref.ID
+
+	l.logger.Info("In ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID))
+
 	// Parse partial appbutler document
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
+		l.logger.Error("Error getting doc in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID))
 		return err
 	}
 
-	appbutlerID := doc.Ref.ID
+	if data.ProjectId == "" {
+		err := fmt.Errorf("Missing projectId")
+		l.logger.Error("Error in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID), zap.Error(err))
+		return err
+	}
 
-	return l.StoreUpstream(data.ServiceType, data.ProjectId, appbutlerID, data.RegionCode)
+	if data.ServiceType == "" {
+		err := fmt.Errorf("Missing serviceType")
+		l.logger.Error("Error in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID), zap.Error(err))
+		return err
+	}
+
+	if data.RegionCode == "" {
+		err := fmt.Errorf("Missing regionCode")
+		l.logger.Error("Error in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID), zap.Error(err))
+		return err
+	}
+
+	l.logger.Info("Passed validation in ProcessAppbutlerDoc.StoreUpstream", zap.String("appbutlerId", appbutlerID))
+
+	err := l.StoreUpstream(data.ServiceType, data.ProjectId, appbutlerID, data.RegionCode)
+	if err != nil {
+		l.logger.Error("Error in ProcessAppbutlerDoc.StoreUpstream", zap.String("appbutlerId", appbutlerID), zap.Error(err))
+	}
+	return err
 }
 
 func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
@@ -135,7 +159,6 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		l.logger.Debug(
 			"Skipping project doc to use appbutler doc instead",
 			zap.String("projectId", doc.Ref.ID),
-			zap.String("appbutlerId", data.AppbutlerId),
 		)
 		return nil
 	}

@@ -266,7 +266,8 @@ func (l *ProjectListener) RunUntilCanceled(collection string, initWg *sync.WaitG
 	}
 
 	log.Info("Starting query")
-	it := col.Where("markedForDeletionAt", "==", nil).Snapshots(ctx)
+
+	it := col.Snapshots(ctx)
 
 	for {
 		snap, err := it.Next()

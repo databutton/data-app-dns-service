@@ -43,9 +43,10 @@ type ProjectDoc struct {
 
 // Partial Appbutler document to be parsed from firestore document
 type AppbutlerDoc struct {
-	ProjectId   string `firestore:"projectId"`
-	ServiceType string `firestore:"serviceType"`
-	RegionCode  string `firestore:"regionCode"`
+	ProjectId         string `firestore:"projectId,omitempty"`
+	ServiceType       string `firestore:"serviceType,omitempty"`
+	RegionCode        string `firestore:"regionCode,omitempty"`
+	CloudRunServiceId string `firestore:"cloudRunServiceId,omitempty"`
 }
 
 type ProjectListener struct {
@@ -91,10 +92,6 @@ func (l *ProjectListener) Destruct() error {
 
 var _ caddy.Destructor = (*ProjectListener)(nil)
 
-func (l *ProjectListener) MakeServiceUrl(serviceType, appbutlerId, regionCode string) string {
-	return fmt.Sprintf("%s-%s-%s-%s.a.run.app:443", serviceType, appbutlerId, GCP_PROJECT_HASH, regionCode)
-}
-
 func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
 	switch collection := doc.Ref.Parent.ID; collection {
 	case collectionProjects:
@@ -102,7 +99,7 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	case collectionAppbutlers:
 		return l.ProcessAppbutlerDoc(ctx, doc)
 	default:
-		err := fmt.Errorf("Unexpected collection %s", collection)
+		err := fmt.Errorf("unexpected collection %s", collection)
 		sentry.CaptureException(err)
 		return err
 	}
@@ -111,40 +108,42 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
 	appbutlerID := doc.Ref.ID
 
-	l.logger.Info("In ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID))
+	log := l.logger.With(zap.String("appbutlerId", appbutlerID))
+
+	log.Debug("Start of ProcessAppbutlerDoc")
 
 	// Parse partial appbutler document
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
-		l.logger.Error("Error getting doc in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID))
+		log.Error("Error getting doc in ProcessAppbutlerDoc")
 		return err
 	}
 
+	// Validate document
 	if data.ProjectId == "" {
-		err := fmt.Errorf("Missing projectId")
-		l.logger.Error("Error in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID), zap.Error(err))
+		err := fmt.Errorf("missing projectId")
+		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
+		return err
+	} else if data.ServiceType == "" {
+		err := fmt.Errorf("missing serviceType")
+		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
+		return err
+	} else if data.RegionCode == "" {
+		err := fmt.Errorf("missing regionCode")
+		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
+		return err
+	} else if data.CloudRunServiceId == "" {
+		err := fmt.Errorf("missing cloudRunServiceId")
+		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
 		return err
 	}
 
-	if data.ServiceType == "" {
-		err := fmt.Errorf("Missing serviceType")
-		l.logger.Error("Error in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID), zap.Error(err))
-		return err
-	}
-
-	if data.RegionCode == "" {
-		err := fmt.Errorf("Missing regionCode")
-		l.logger.Error("Error in ProcessAppbutlerDoc", zap.String("appbutlerId", appbutlerID), zap.Error(err))
-		return err
-	}
-
-	l.logger.Info("Passed validation in ProcessAppbutlerDoc.StoreUpstream", zap.String("appbutlerId", appbutlerID))
-
-	err := l.StoreUpstream(data.ServiceType, data.ProjectId, appbutlerID, data.RegionCode)
+	err := l.StoreUpstream(data.ServiceType, data.ProjectId, data.RegionCode, data.CloudRunServiceId)
 	if err != nil {
-		l.logger.Error("Error in ProcessAppbutlerDoc.StoreUpstream", zap.String("appbutlerId", appbutlerID), zap.Error(err))
+		log.Error("Error in ProcessAppbutlerDoc.StoreUpstream", zap.Error(err))
+		return err
 	}
-	return err
+	return nil
 }
 
 func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
@@ -163,11 +162,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		return nil
 	}
 
-	// For legacy projects without a appbutler entry, the service name is
-	// based on the projectId so we just define appbutlerId == projectId
-	// (eventually we can migrate all projects to have a appbutler entry using the same definition)
 	projectID := doc.Ref.ID
-	appbutlerID := projectID
 
 	// Set fallback region if missing, for projects before we added multiregion
 	region := data.Region
@@ -183,19 +178,23 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
 
-	err := l.StoreUpstream("devx", projectID, appbutlerID, regionCode)
-	if err != nil {
-		return err
+	// Add both devx and prodx to mapping
+	for _, serviceType := range []string{"devx", "prodx"} {
+		serviceId := fmt.Sprintf("%s-%s", serviceType, projectID)
+		err := l.StoreUpstream(serviceType, projectID, regionCode, serviceId)
+		if err != nil {
+			return err
+		}
 	}
-	return l.StoreUpstream("prodx", projectID, appbutlerID, regionCode)
+	return nil
 }
 
-func (l *ProjectListener) StoreUpstream(serviceType, projectID, appbutlerID, regionCode string) error {
+func (l *ProjectListener) StoreUpstream(serviceType, projectID, regionCode, serviceId string) error {
 	log := l.logger.With(
 		zap.String("serviceType", serviceType),
 		zap.String("projectId", projectID),
-		zap.String("appbutlerId", appbutlerID),
 		zap.String("region", regionCode),
+		zap.String("serviceId", serviceId),
 	)
 
 	// This should never happen here
@@ -207,12 +206,13 @@ func (l *ProjectListener) StoreUpstream(serviceType, projectID, appbutlerID, reg
 
 	// Write to threadsafe map optimized for direct lookup of upstream url from (serviceType+projectID)
 	key := serviceType + projectID
-	url := l.MakeServiceUrl(serviceType, appbutlerID, regionCode)
+	url := fmt.Sprintf("%s-%s-%s.a.run.app:443", serviceId, GCP_PROJECT_HASH, regionCode)
 
 	// Note: When we've migrated to appbutlers, we'll always have a region and can use this only once instead:
 	// _, _ = l.upstreamMap.LoadOrStore(key, url)
 	l.upstreamMap.Store(key, url)
 
+	log.Info("Successfully stored upstream in map")
 	return nil
 }
 
@@ -262,7 +262,7 @@ func (l *ProjectListener) RunUntilCanceled(collection string, initWg *sync.WaitG
 
 	col := l.firestoreClient.Collection(collection)
 	if col == nil {
-		return fmt.Errorf("Could not get collection %s", collection)
+		return fmt.Errorf("could not get collection %s", collection)
 	}
 
 	log.Info("Starting query")

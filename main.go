@@ -3,7 +3,6 @@ package dataappdnsservice
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -17,11 +16,11 @@ import (
 
 // Errors
 var (
-	ErrProjectHeaderMissing = errors.New("X-Databutton-Project-Id header missing")
-	ErrServiceHeaderMissing = errors.New("X-Databutton-Service-Type header missing")
-	ErrUpstreamNotFound     = errors.New("Could not find upstream url")
-	ErrInvalidRegion        = errors.New("Invalid region")
-	ErrChaos                = errors.New("Chaos test for testing")
+	ErrProjectHeaderMissing = errors.New("missing header X-Databutton-Project-Id")
+	ErrServiceHeaderMissing = errors.New("missing header X-Databutton-Service-Type")
+	ErrUpstreamNotFound     = errors.New("could not find upstream url")
+	ErrInvalidRegion        = errors.New("invalid region")
+	ErrChaos                = errors.New("chaos test for testing")
 )
 
 // Used to coordinate initialization of dependencies only once
@@ -67,7 +66,6 @@ type DevxUpstreams struct {
 	logger    *zap.Logger
 	listener  *ProjectListener
 	usageKeys []string
-	closers   []io.Closer
 }
 
 func init() {

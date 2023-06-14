@@ -119,12 +119,13 @@ func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestor
 		return err
 	}
 
-	// Validate document
+	// Skip appbutlers without assigned projects, there's nothing to route
 	if data.ProjectId == "" {
-		err := fmt.Errorf("missing projectId")
-		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
-		return err
-	} else if data.ServiceType == "" {
+		return nil
+	}
+
+	// Validate document
+	if data.ServiceType == "" {
 		err := fmt.Errorf("missing serviceType")
 		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
 		return err
@@ -264,6 +265,9 @@ func (l *ProjectListener) RunUntilCanceled(collection string, initWg *sync.WaitG
 	if col == nil {
 		return fmt.Errorf("could not get collection %s", collection)
 	}
+
+	// TODO: To scale, iterate over collection ordered by update time
+	//    and keep track of updatetime of last processed document?
 
 	log.Info("Starting query")
 

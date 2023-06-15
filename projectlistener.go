@@ -44,6 +44,7 @@ type ProjectDoc struct {
 // Partial Appbutler document to be parsed from firestore document
 type AppbutlerDoc struct {
 	ProjectId         string `firestore:"projectId,omitempty"`
+	ServiceIsReady    bool   `firestore:"serviceIsReady,omitempty"`
 	ServiceType       string `firestore:"serviceType,omitempty"`
 	RegionCode        string `firestore:"regionCode,omitempty"`
 	CloudRunServiceId string `firestore:"cloudRunServiceId,omitempty"`
@@ -119,8 +120,12 @@ func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestor
 		return err
 	}
 
-	// Skip appbutlers without assigned projects, there's nothing to route
+	// Conditionally skip documents
 	if data.ProjectId == "" {
+		// Skip free pool appbutlers without assigned projects, there's nothing to route
+		return nil
+	} else if !data.ServiceIsReady {
+		// Skip before service is ready to receive requests
 		return nil
 	}
 
@@ -175,7 +180,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	regionCode, ok := REGION_LOOKUP_MAP[region]
 	if !ok {
 		l.logger.Error("Could not find project region", zap.String("region", region))
-		sentry.CaptureMessage(fmt.Sprintf("Could not find project region %s", region))
+		sentry.CaptureException(fmt.Errorf("Could not find project region %s", region))
 		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
 

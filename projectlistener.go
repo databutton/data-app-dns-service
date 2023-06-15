@@ -3,6 +3,7 @@ package dataappdnsservice
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -66,6 +67,7 @@ func NewProjectListener(logger *zap.Logger) (*ProjectListener, error) {
 		return nil, err
 	}
 
+	// This use of context is a bit hacky, some refactoring can probably make the code cleaner
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &ProjectListener{
 		ctx:             ctx,
@@ -100,23 +102,14 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 	case collectionAppbutlers:
 		return l.ProcessAppbutlerDoc(ctx, doc)
 	default:
-		err := fmt.Errorf("unexpected collection %s", collection)
-		sentry.CaptureException(err)
-		return err
+		return fmt.Errorf("unexpected collection %s", collection)
 	}
 }
 
 func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
-	appbutlerID := doc.Ref.ID
-
-	log := l.logger.With(zap.String("appbutlerId", appbutlerID))
-
-	log.Debug("Start of ProcessAppbutlerDoc")
-
 	// Parse partial appbutler document
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
-		log.Error("Error getting doc in ProcessAppbutlerDoc")
 		return err
 	}
 
@@ -131,22 +124,15 @@ func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestor
 
 	// Validate document
 	if data.ServiceType == "" {
-		err := fmt.Errorf("missing serviceType")
-		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
-		return err
+		return fmt.Errorf("missing serviceType")
 	} else if data.RegionCode == "" {
-		err := fmt.Errorf("missing regionCode")
-		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
-		return err
+		return fmt.Errorf("missing regionCode")
 	} else if data.CloudRunServiceId == "" {
-		err := fmt.Errorf("missing cloudRunServiceId")
-		log.Error("Error in ProcessAppbutlerDoc", zap.Error(err))
-		return err
+		return fmt.Errorf("missing cloudRunServiceId")
 	}
 
 	err := l.StoreUpstream(data.ServiceType, data.ProjectId, data.RegionCode, data.CloudRunServiceId)
 	if err != nil {
-		log.Error("Error in ProcessAppbutlerDoc.StoreUpstream", zap.Error(err))
 		return err
 	}
 	return nil
@@ -196,29 +182,18 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 }
 
 func (l *ProjectListener) StoreUpstream(serviceType, projectID, regionCode, serviceId string) error {
-	log := l.logger.With(
+	// Write url to threadsafe map optimized for direct lookup of upstream url from (serviceType+projectID)
+	// If there's already an entry, this will overwrite it.
+	key := serviceType + projectID
+	url := fmt.Sprintf("%s-%s-%s.a.run.app:443", serviceId, GCP_PROJECT_HASH, regionCode)
+	l.upstreamMap.Store(key, url)
+
+	l.logger.Debug("Successfully stored upstream in map",
 		zap.String("serviceType", serviceType),
 		zap.String("projectId", projectID),
 		zap.String("region", regionCode),
 		zap.String("serviceId", serviceId),
 	)
-
-	// This should never happen here
-	if regionCode == "" {
-		log.Error("Missing region in StoreUpstream")
-		sentry.CaptureMessage("Missing region in StoreUpstream")
-		return errors.Wrapf(ErrInvalidRegion, "Region=%s", regionCode)
-	}
-
-	// Write to threadsafe map optimized for direct lookup of upstream url from (serviceType+projectID)
-	key := serviceType + projectID
-	url := fmt.Sprintf("%s-%s-%s.a.run.app:443", serviceId, GCP_PROJECT_HASH, regionCode)
-
-	// Note: When we've migrated to appbutlers, we'll always have a region and can use this only once instead:
-	// _, _ = l.upstreamMap.LoadOrStore(key, url)
-	l.upstreamMap.Store(key, url)
-
-	log.Info("Successfully stored upstream in map")
 	return nil
 }
 
@@ -262,9 +237,13 @@ func (l *ProjectListener) Dump() {
 }
 
 // TODO: Update this to also delete projects (although deleted projects will be gone on a restart so not critical for a long time)
-func (l *ProjectListener) RunUntilCanceled(collection string, initWg *sync.WaitGroup) error {
-	ctx := l.ctx
+func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection string, initWg *sync.WaitGroup) error {
 	log := l.logger.With(zap.String("collection", collection))
+
+	hub := sentry.GetHubFromContext(ctx)
+	hub.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetTag("collection", collection)
+	})
 
 	col := l.firestoreClient.Collection(collection)
 	if col == nil {
@@ -284,12 +263,10 @@ func (l *ProjectListener) RunUntilCanceled(collection string, initWg *sync.WaitG
 		if status.Code(err) == codes.Canceled {
 			log.Warn("Shutting down gracefully, I've been cancelled.", zap.Error(err))
 			return nil
-		}
-
-		if err != nil {
+		} else if err != nil {
+			// Once we get an error here the iterator won't recover
 			log.Error("Snapshots.Next err", zap.Error(err))
-			sentry.CaptureException(err)
-			// The way I understand it, once we get an error here the iterator won't recover
+			hub.CaptureException(err)
 			return err
 		}
 
@@ -304,42 +281,40 @@ func (l *ProjectListener) RunUntilCanceled(collection string, initWg *sync.WaitG
 					initWg.Done()
 					initWg = nil
 				}
-
-				// Once we get Done from Next we'll always get Done.
-				log.Debug("Done processing snapshots")
 				break
-			}
-
-			if err != nil {
-				sentry.CaptureException(err)
-				log.Error("Documents.Next error", zap.Error(err))
+			} else if err != nil {
+				// Notify us and fail
+				hub.WithScope(func(scope *sentry.Scope) {
+					scope.SetTag("processedDocs", strconv.Itoa(docCount))
+					hub.CaptureException(err)
+				})
+				log.Error("Documents.Next error", zap.Error(err), zap.String("collection", collection))
 				break
 			}
 
 			// Process a single document
 			if err := l.ProcessDoc(ctx, doc); err != nil {
-				// Notify us but keep going if it fails
-				sentry.WithScope(func(scope *sentry.Scope) {
-					scope.SetLevel(sentry.LevelError)
+				// Notify us of errors but keep going
+				hub.WithScope(func(scope *sentry.Scope) {
+					scope.SetTag("processedDocs", strconv.Itoa(docCount))
 					scope.SetTag("id", doc.Ref.ID)
-					sentry.CaptureException(err)
+					hub.CaptureException(err)
 				})
-
-				log.Error("ProcessDoc error", zap.Error(err))
+				log.Error("ProcessDoc error", zap.Error(err), zap.String("collection", collection))
 			}
 		}
 		log.Debug("Processed documents in snapshot", zap.Int("documents", docCount))
 	}
 }
 
-func (l *ProjectListener) RunWithRestarts(collection string, initWg *sync.WaitGroup) error {
+func (l *ProjectListener) RunWithoutCrashing(ctx context.Context, collection string, initWg *sync.WaitGroup) error {
 	log := l.logger.With(zap.String("collection", collection))
 
 	log.Info("Firestore listener starting")
 
 	startTime := time.Now()
 	err := DontPanic(func() error {
-		return l.RunUntilCanceled(collection, initWg)
+		return l.RunUntilCanceled(ctx, collection, initWg)
 	})
 	runTime := time.Since(startTime)
 

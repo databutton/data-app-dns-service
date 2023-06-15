@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -117,8 +119,12 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		appbutlersInitWg := new(sync.WaitGroup)
 		appbutlersInitWg.Add(1)
 		go func() {
+			ctx, cancel := context.WithCancel(listener.ctx)
+			defer cancel()
+			ctx = sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
+
 			// This should run forever
-			err := listener.RunWithRestarts(collectionAppbutlers, appbutlersInitWg)
+			err := listener.RunWithoutCrashing(ctx, collectionAppbutlers, appbutlersInitWg)
 
 			// Panic in a goroutine kills the program abruptly,
 			// do that unless we were canceled. Perhaps there
@@ -139,8 +145,12 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		projectsInitWg := new(sync.WaitGroup)
 		projectsInitWg.Add(1)
 		go func() {
+			ctx, cancel := context.WithCancel(listener.ctx)
+			defer cancel()
+			ctx = sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
+
 			// This should run forever
-			err := listener.RunWithRestarts(collectionProjects, projectsInitWg)
+			err := listener.RunWithoutCrashing(ctx, collectionProjects, projectsInitWg)
 
 			// Panic in a goroutine kills the program abruptly,
 			// do that unless we were canceled. Perhaps there
@@ -210,16 +220,15 @@ func (du *DevxUpstreams) Cleanup() error {
 		allErrors = append(allErrors, err)
 	}
 
-	// Capture shutdown errors to sentry, just so we know if it happens
-	// err := errors.Join(allErrors...)
-	if len(allErrors) == 0 {
-		return nil
+	// Capture shutdown errors to sentry, just so we know if it happens.
+	// Report all but just pick one for returning
+	var err error
+	for _, err := range allErrors {
+		sentry.CaptureException(err)
 	}
-
-	// Just pick one
-	err := allErrors[0]
-	sentry.CaptureException(err)
-	du.logger.Warn("Errors during shutdown", zap.Error(err))
+	if err != nil {
+		du.logger.Warn("Errors during shutdown, see sentry")
+	}
 	return err
 }
 
@@ -230,23 +239,33 @@ func (du *DevxUpstreams) Cleanup() error {
 func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
+
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
-	if upstream != "" {
-		// We should probably remove this, it's very noisy. Keeping it for now.
-		d.logger.Debug(
-			"Got upstream",
-			zap.String("upstream", upstream),
-			zap.String("projectID", projectID),
-			zap.String("serviceType", serviceType),
-		)
-		return []*reverseproxy.Upstream{
-			{
-				Dial: upstream,
-			},
-		}, nil
+	if upstream == "" {
+		// TODO: If this stays a little flaky we could try to fetch
+		//   the appbutler document directly here, but lets delay that
+		//   until we can remove the project listener to simplify here
+		return nil, d.upstreamMissing(r, projectID, serviceType)
 	}
 
+	// Dropping this since it's so noisy
+	// d.logger.Debug(
+	// 	"Got upstream",
+	// 	zap.String("upstream", upstream),
+	// 	zap.String("projectID", projectID),
+	// 	zap.String("serviceType", serviceType),
+	// )
+
+	return []*reverseproxy.Upstream{
+		{
+			Dial: upstream,
+		},
+	}, nil
+}
+
+// This should happen rarely, report as much as possible to track why
+func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType string) error {
 	var err error
 	switch {
 	case projectID == "":
@@ -257,12 +276,22 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 		err = ErrUpstreamNotFound
 	}
 
-	sentry.WithScope(func(scope *sentry.Scope) {
+	// Clone hub for thread safety, this is in the scope of a single request
+	hub := sentry.CurrentHub().Clone()
+
+	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentry.LevelError)
+
+		scope.SetRequest(r)
+
+		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
+		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
+
 		scope.SetTag("projectId", projectID)
 		scope.SetTag("serviceType", serviceType)
-		sentry.CaptureException(err)
 	})
+
+	hub.CaptureException(err)
 
 	d.logger.Error(
 		"Failed to get upstream",
@@ -270,7 +299,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 		zap.String("serviceType", serviceType),
 	)
 
-	return nil, err
+	return err
 }
 
 // Interface guards

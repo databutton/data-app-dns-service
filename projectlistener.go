@@ -147,10 +147,10 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 
 	// If this project has or will have an associated appbutler, delegate to ProcessAppbutlerDoc.
 	if data.EnableAppbutlers {
-		l.logger.Debug(
-			"Skipping project doc to use appbutler doc instead",
-			zap.String("projectId", doc.Ref.ID),
-		)
+		// l.logger.Debug(
+		// 	"Skipping project doc to use appbutler doc instead",
+		// 	zap.String("projectId", doc.Ref.ID),
+		// )
 		return nil
 	}
 
@@ -166,6 +166,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	regionCode, ok := REGION_LOOKUP_MAP[region]
 	if !ok {
 		l.logger.Error("Could not find project region", zap.String("region", region))
+		// FIXME: Get hub from context?
 		sentry.CaptureException(fmt.Errorf("Could not find project region %s", region))
 		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
@@ -188,12 +189,12 @@ func (l *ProjectListener) StoreUpstream(serviceType, projectID, regionCode, serv
 	url := fmt.Sprintf("%s-%s-%s.a.run.app:443", serviceId, GCP_PROJECT_HASH, regionCode)
 	l.upstreamMap.Store(key, url)
 
-	l.logger.Debug("Successfully stored upstream in map",
-		zap.String("serviceType", serviceType),
-		zap.String("projectId", projectID),
-		zap.String("region", regionCode),
-		zap.String("serviceId", serviceId),
-	)
+	// l.logger.Debug("Successfully stored upstream in map",
+	// 	zap.String("serviceType", serviceType),
+	// 	zap.String("projectId", projectID),
+	// 	zap.String("region", regionCode),
+	// 	zap.String("serviceId", serviceId),
+	// )
 	return nil
 }
 
@@ -325,6 +326,7 @@ func (l *ProjectListener) RunWithoutCrashing(ctx context.Context, collection str
 			scope.SetLevel(sentry.LevelError)
 			scope.SetTag("collection", collection)
 			scope.SetTag("runTime", runTime.String())
+			// FIXME: Get hub from context?
 			sentry.CaptureException(err)
 		})
 		log.Error("Firestore listener returned error", zap.Error(err))

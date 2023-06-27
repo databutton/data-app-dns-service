@@ -166,6 +166,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	regionCode, ok := REGION_LOOKUP_MAP[region]
 	if !ok {
 		l.logger.Error("Could not find project region", zap.String("region", region))
+		// FIXME: Get hub from context?
 		sentry.CaptureException(fmt.Errorf("Could not find project region %s", region))
 		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
@@ -325,6 +326,7 @@ func (l *ProjectListener) RunWithoutCrashing(ctx context.Context, collection str
 			scope.SetLevel(sentry.LevelError)
 			scope.SetTag("collection", collection)
 			scope.SetTag("runTime", runTime.String())
+			// FIXME: Get hub from context?
 			sentry.CaptureException(err)
 		})
 		log.Error("Firestore listener returned error", zap.Error(err))

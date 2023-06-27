@@ -3,6 +3,7 @@ package dataappdnsservice
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -65,6 +66,7 @@ func initSentry(logger *zap.Logger) error {
 }
 
 type DevxUpstreams struct {
+	hub       *sentry.Hub
 	logger    *zap.Logger
 	listener  *ProjectListener
 	usageKeys []string
@@ -101,6 +103,12 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	}
 	d.usageKeys = append(d.usageKeys, sentryInitUsagePoolKey)
 
+	// Clone a sentry hub for this module instance
+	d.hub = sentry.NewHub(nil, sentry.NewScope())
+	d.hub.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetTag("provisioningStartedAt", time.Now().UTC().Format(time.RFC3339))
+	})
+
 	// Initialize the firestore cache (launches goroutine only once)
 	startTime := time.Now()
 	listener, listenerLoaded, err := usagePool.LoadOrNew(projectsListenerUsagePoolKey, func() (caddy.Destructor, error) {
@@ -121,15 +129,22 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		go func() {
 			ctx, cancel := context.WithCancel(listener.ctx)
 			defer cancel()
-			ctx = sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
+
+			hub := d.hub.Clone()
+			ctx = sentry.SetHubOnContext(ctx, hub)
 
 			// This should run forever
 			err := listener.RunWithoutCrashing(ctx, collectionAppbutlers, appbutlersInitWg)
 
-			// Panic in a goroutine kills the program abruptly,
-			// do that unless we were canceled. Perhaps there
-			// is a nicer way to shut down caddy, we'll see in prod...
-			if !errors.Is(listener.ctx.Err(), context.Canceled) {
+			if err != nil {
+				hub.CaptureException(err)
+			}
+
+			// Panic in a goroutine kills the program abruptly, do that
+			// unless we were canceled, such that the service restarts.
+			// Perhaps there is a nicer way to shut down caddy, we'll see in prod...
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				hub.CaptureException(ctx.Err())
 				panic(err)
 			}
 		}()
@@ -147,15 +162,22 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		go func() {
 			ctx, cancel := context.WithCancel(listener.ctx)
 			defer cancel()
-			ctx = sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
+
+			hub := d.hub.Clone()
+			ctx = sentry.SetHubOnContext(ctx, hub)
 
 			// This should run forever
 			err := listener.RunWithoutCrashing(ctx, collectionProjects, projectsInitWg)
 
-			// Panic in a goroutine kills the program abruptly,
-			// do that unless we were canceled. Perhaps there
-			// is a nicer way to shut down caddy, we'll see in prod...
-			if !errors.Is(listener.ctx.Err(), context.Canceled) {
+			if err != nil {
+				hub.CaptureException(err)
+			}
+
+			// Panic in a goroutine kills the program abruptly, do that
+			// unless we were canceled, such that the service restarts.
+			// Perhaps there is a nicer way to shut down caddy, we'll see in prod...
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				hub.CaptureException(ctx.Err())
 				panic(err)
 			}
 		}()
@@ -174,7 +196,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			zap.Bool("loaded", listenerLoaded),
 			zap.Error(err),
 		)
-		sentry.CaptureException(err)
+		d.hub.CaptureException(err)
 		return err
 	}
 	d.listener = listener.(*ProjectListener)
@@ -204,13 +226,14 @@ func (d *DevxUpstreams) Validate() error {
 //
 // Decrements usagePool counters which eventually
 // leads to their destructors being called.
-func (du *DevxUpstreams) Cleanup() error {
+func (d *DevxUpstreams) Cleanup() error {
+
 	var allErrors []error
-	for _, key := range du.usageKeys {
+	for _, key := range d.usageKeys {
 		// Catch panic from Delete in case we have a bug and decrement too many times
 		err := DontPanic(func() error {
 			deleted, err := usagePool.Delete(key)
-			du.logger.Info("Decremented usage counter",
+			d.logger.Info("Decremented usage counter",
 				zap.String("key", key),
 				zap.Bool("deleted", deleted),
 				zap.Error(err),
@@ -221,15 +244,16 @@ func (du *DevxUpstreams) Cleanup() error {
 	}
 
 	// Capture shutdown errors to sentry, just so we know if it happens.
-	// Report all but just pick one for returning
-	var err error
-	for _, err := range allErrors {
-		sentry.CaptureException(err)
+	if hub := d.hub; hub != nil {
+		for _, err := range allErrors {
+			hub.CaptureException(err)
+		}
 	}
-	if err != nil {
-		du.logger.Warn("Errors during shutdown, see sentry")
+	if len(allErrors) > 0 {
+		d.logger.Warn("Errors during shutdown, see sentry")
+		return fmt.Errorf("%v", allErrors)
 	}
-	return err
+	return nil
 }
 
 // GetUpstreams implements reverseproxy.UpstreamSource.
@@ -277,20 +301,22 @@ func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType 
 	}
 
 	// Clone hub for thread safety, this is in the scope of a single request
-	hub := sentry.CurrentHub().Clone()
+	hub := d.hub.Clone()
 
+	// Add some request context for the error
 	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentry.LevelError)
 
+		// This seems to set the url to something missing the project part in the middle
 		scope.SetRequest(r)
 
+		// TODO: This doesn't seem to be available
 		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
 		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
 
 		scope.SetTag("projectId", projectID)
 		scope.SetTag("serviceType", serviceType)
 	})
-
 	hub.CaptureException(err)
 
 	d.logger.Error(

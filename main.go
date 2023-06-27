@@ -65,7 +65,6 @@ func initSentry(logger *zap.Logger) error {
 }
 
 type DevxUpstreams struct {
-	hub       *sentry.Hub
 	logger    *zap.Logger
 	listener  *ProjectListener
 	usageKeys []string
@@ -102,11 +101,6 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	}
 	d.usageKeys = append(d.usageKeys, sentryInitUsagePoolKey)
 
-	d.hub = sentry.CurrentHub().Clone()
-	d.hub.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetTag("provisioningStartedAt", time.Now().UTC().Format(time.RFC3339))
-	})
-
 	// Initialize the firestore cache (launches goroutine only once)
 	startTime := time.Now()
 	listener, listenerLoaded, err := usagePool.LoadOrNew(projectsListenerUsagePoolKey, func() (caddy.Destructor, error) {
@@ -127,7 +121,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		go func() {
 			ctx, cancel := context.WithCancel(listener.ctx)
 			defer cancel()
-			ctx = sentry.SetHubOnContext(ctx, d.hub.Clone())
+			ctx = sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
 
 			// This should run forever
 			err := listener.RunWithoutCrashing(ctx, collectionAppbutlers, appbutlersInitWg)
@@ -135,7 +129,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			// Panic in a goroutine kills the program abruptly,
 			// do that unless we were canceled. Perhaps there
 			// is a nicer way to shut down caddy, we'll see in prod...
-			if !errors.Is(ctx.Err(), context.Canceled) {
+			if !errors.Is(listener.ctx.Err(), context.Canceled) {
 				panic(err)
 			}
 		}()
@@ -153,7 +147,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		go func() {
 			ctx, cancel := context.WithCancel(listener.ctx)
 			defer cancel()
-			ctx = sentry.SetHubOnContext(ctx, d.hub.Clone())
+			ctx = sentry.SetHubOnContext(ctx, sentry.CurrentHub().Clone())
 
 			// This should run forever
 			err := listener.RunWithoutCrashing(ctx, collectionProjects, projectsInitWg)
@@ -161,7 +155,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			// Panic in a goroutine kills the program abruptly,
 			// do that unless we were canceled. Perhaps there
 			// is a nicer way to shut down caddy, we'll see in prod...
-			if !errors.Is(ctx.Err(), context.Canceled) {
+			if !errors.Is(listener.ctx.Err(), context.Canceled) {
 				panic(err)
 			}
 		}()
@@ -180,7 +174,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			zap.Bool("loaded", listenerLoaded),
 			zap.Error(err),
 		)
-		d.hub.CaptureException(err)
+		sentry.CaptureException(err)
 		return err
 	}
 	d.listener = listener.(*ProjectListener)
@@ -211,7 +205,6 @@ func (d *DevxUpstreams) Validate() error {
 // Decrements usagePool counters which eventually
 // leads to their destructors being called.
 func (du *DevxUpstreams) Cleanup() error {
-
 	var allErrors []error
 	for _, key := range du.usageKeys {
 		// Catch panic from Delete in case we have a bug and decrement too many times
@@ -231,7 +224,7 @@ func (du *DevxUpstreams) Cleanup() error {
 	// Report all but just pick one for returning
 	var err error
 	for _, err := range allErrors {
-		du.hub.CaptureException(err)
+		sentry.CaptureException(err)
 	}
 	if err != nil {
 		du.logger.Warn("Errors during shutdown, see sentry")
@@ -284,7 +277,7 @@ func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType 
 	}
 
 	// Clone hub for thread safety, this is in the scope of a single request
-	hub := d.hub.Clone()
+	hub := sentry.CurrentHub().Clone()
 
 	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentry.LevelError)

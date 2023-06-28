@@ -54,6 +54,7 @@ func initSentry(logger *zap.Logger) error {
 	_, loaded, err := usagePool.LoadOrNew(sentryInitUsagePoolKey, func() (caddy.Destructor, error) {
 		err := sentry.Init(sentry.ClientOptions{
 			Dsn:              SENTRY_DSN,
+			Release:          os.Getenv("DATA_APP_DNS_RELEASE"),
 			TracesSampleRate: SENTRY_TRACES_SAMPLE_RATE,
 		})
 		if err != nil {

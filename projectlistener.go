@@ -153,7 +153,15 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		// )
 		return nil
 	}
-	sentry.CaptureMessage("Entered deprecated ProcessProjectDoc!")
+
+	if data.Region == "" {
+		// I've migrated projects to always have region
+		return nil
+	}
+
+	// This should never happen now
+	hub := sentry.GetHubFromContext(ctx)
+	hub.CaptureMessage("Entered deprecated ProcessProjectDoc!")
 
 	projectID := doc.Ref.ID
 

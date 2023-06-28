@@ -153,6 +153,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		// )
 		return nil
 	}
+	sentry.CaptureMessage("Entered deprecated ProcessProjectDoc!")
 
 	projectID := doc.Ref.ID
 
@@ -166,8 +167,9 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	regionCode, ok := REGION_LOOKUP_MAP[region]
 	if !ok {
 		l.logger.Error("Could not find project region", zap.String("region", region))
-		// FIXME: Get hub from context?
-		sentry.CaptureException(fmt.Errorf("Could not find project region %s", region))
+		err := fmt.Errorf("could not find project region %s", region)
+		hub := sentry.GetHubFromContext(ctx).Clone()
+		hub.CaptureException(err)
 		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
 	}
 
@@ -310,8 +312,13 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 
 func (l *ProjectListener) RunWithoutCrashing(ctx context.Context, collection string, initWg *sync.WaitGroup) error {
 	log := l.logger.With(zap.String("collection", collection))
-
 	log.Info("Firestore listener starting")
+
+	hub := sentry.GetHubFromContext(ctx).Clone()
+	hub.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetTag("collection", collection)
+		scope.SetTag("startTime", time.Now().UTC().Format(time.RFC3339))
+	})
 
 	startTime := time.Now()
 	err := DontPanic(func() error {
@@ -322,12 +329,10 @@ func (l *ProjectListener) RunWithoutCrashing(ctx context.Context, collection str
 	log = log.With(zap.Duration("runTime", runTime))
 
 	if err != nil {
-		sentry.WithScope(func(scope *sentry.Scope) {
+		hub.WithScope(func(scope *sentry.Scope) {
 			scope.SetLevel(sentry.LevelError)
-			scope.SetTag("collection", collection)
 			scope.SetTag("runTime", runTime.String())
-			// FIXME: Get hub from context?
-			sentry.CaptureException(err)
+			hub.CaptureException(err)
 		})
 		log.Error("Firestore listener returned error", zap.Error(err))
 		return err

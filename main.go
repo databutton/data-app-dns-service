@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -73,7 +76,37 @@ type DevxUpstreams struct {
 }
 
 func init() {
+	// This will allow Caddy to register signal handlers for graceful shutdown if possible,
+	// although this doesn't cover SIGPIPE 13 seen in prod...
+	caddy.TrapSignals()
+
+	// Install our custom sigpipe handler
+	trapSignal13()
+
+	// Let Caddy know about this module
 	caddy.RegisterModule(DevxUpstreams{})
+}
+
+// Send signal to the current process
+func signalSelf(sig os.Signal) error {
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		return err
+	}
+	return p.Signal(sig)
+}
+
+// Signal 13 observed in prod because we're piping logs to jq in a bash script.
+// Trying to just translate it to sigint here.
+func trapSignal13() {
+	go func() {
+		shutdown := make(chan os.Signal, 1)
+		signal.Notify(shutdown, syscall.SIGPIPE)
+		for {
+			<-shutdown
+			_ = signalSelf(os.Interrupt)
+		}
+	}()
 }
 
 // CaddyModule returns the Caddy module information.
@@ -86,7 +119,7 @@ func (DevxUpstreams) CaddyModule() caddy.ModuleInfo {
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
 func (devx *DevxUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	// TODO: We must implement this function, but should we do something here?
+	// We must implement this function, but should we do something here?
 	return nil
 }
 

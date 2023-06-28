@@ -144,6 +144,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	if err := doc.DataTo(&data); err != nil {
 		return err
 	}
+	projectID := doc.Ref.ID
 
 	// If this project has or will have an associated appbutler, delegate to ProcessAppbutlerDoc.
 	if data.EnableAppbutlers {
@@ -161,9 +162,12 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 
 	// This should never happen now
 	hub := sentry.GetHubFromContext(ctx)
-	hub.CaptureMessage("Entered deprecated ProcessProjectDoc!")
-
-	projectID := doc.Ref.ID
+	hub.WithScope(func(scope *sentry.Scope) {
+		scope.SetTag("projectId", projectID)
+		scope.SetTag("region", data.Region)
+		scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
+		hub.CaptureMessage("Entered deprecated ProcessProjectDoc!")
+	})
 
 	// Set fallback region if missing, for projects before we added multiregion
 	region := data.Region

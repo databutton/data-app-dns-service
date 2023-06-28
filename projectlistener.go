@@ -37,6 +37,9 @@ type ProjectDoc struct {
 	// Legacy projects will have the region here
 	Region string `firestore:"region,omitempty"`
 
+	// Legacy projects will have this set unless in broken state
+	DevxUrl string `firestore:"devxUrl,omitempty"`
+
 	// During a migration period, new projects will need to set
 	// this on creation to use appbutlers for service creation
 	EnableAppbutlers bool `firestore:"enableAppbutlers,omitempty"`
@@ -160,13 +163,19 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		return nil
 	}
 
+	if data.DevxUrl == "" {
+		// Only broken legacy projects that failed to create properly should have blank devxUrl,
+		// and new projects should have enableAppbutlers and stop above
+		return nil
+	}
+
 	// This should never happen now
 	hub := sentry.GetHubFromContext(ctx)
 	hub.WithScope(func(scope *sentry.Scope) {
 		scope.SetTag("projectId", projectID)
 		scope.SetTag("region", data.Region)
 		scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
-		hub.CaptureMessage("Entered deprecated ProcessProjectDoc!")
+		hub.CaptureMessage("Entered deprecated ProcessProjectDoc.")
 	})
 
 	// Set fallback region if missing, for projects before we added multiregion

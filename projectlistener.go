@@ -174,8 +174,9 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	hub.WithScope(func(scope *sentry.Scope) {
 		scope.SetTag("projectId", projectID)
 		scope.SetTag("region", data.Region)
+		scope.SetTag("devxUrl", data.DevxUrl)
 		scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
-		hub.CaptureMessage("Entered deprecated ProcessProjectDoc.")
+		hub.CaptureMessage("ProcessProjectDoc is deprecated but still got here")
 	})
 
 	// Set fallback region if missing, for projects before we added multiregion
@@ -268,6 +269,7 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTag("collection", collection)
 	})
+	hub.CaptureMessage("Just checking that I'm getting the new release!")
 
 	col := l.firestoreClient.Collection(collection)
 	if col == nil {

@@ -178,17 +178,19 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		return nil
 	}
 
+	// GOT THIS:
 	// This should only happen rarely now, added to check that sentry even works
-	hub := sentry.GetHubFromContext(ctx)
-	hub.WithScope(func(scope *sentry.Scope) {
-		scope.SetTag("projectId", projectID)
-		scope.SetTag("region", data.Region)
-		scope.SetTag("devxUrl", data.DevxUrl)
-		scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
-		hub.CaptureException(fmt.Errorf("ProcessProjectDoc processing project without appbutlers"))
-	})
+	// hub := sentry.GetHubFromContext(ctx)
+	// hub.WithScope(func(scope *sentry.Scope) {
+	// 	scope.SetTag("projectId", projectID)
+	// 	scope.SetTag("region", data.Region)
+	// 	scope.SetTag("devxUrl", data.DevxUrl)
+	// 	scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
+	// 	hub.CaptureException(fmt.Errorf("ProcessProjectDoc processing project without appbutlers"))
+	// })
 
 	if data.DevxUrl == "" {
+		// GOT THIS
 		// Only broken legacy projects that failed to create properly should have blank devxUrl,
 		// and new projects should have enableAppbutlers and stop above
 		l.logger.Warn(
@@ -199,6 +201,7 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 	}
 
 	if data.Region == "" {
+		// DID NOT GET THIS
 		// I've migrated projects to always have region
 		l.logger.Warn(
 			"Project doc without enableAppbutlers has no region",
@@ -207,13 +210,15 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 		return nil
 	}
 
+	// DID NOT GET THIS
 	l.logger.Error(
 		"Project doc without enableAppbutlers getting all the way to processing!",
 		zap.String("projectId", doc.Ref.ID),
 	)
 
+	// DID NOT GET THIS:
 	// This should never happen now
-	hub = sentry.GetHubFromContext(ctx)
+	hub := sentry.GetHubFromContext(ctx)
 	hub.WithScope(func(scope *sentry.Scope) {
 		scope.SetTag("projectId", projectID)
 		scope.SetTag("region", data.Region)
@@ -312,8 +317,6 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTag("collection", collection)
 	})
-	hub.CaptureMessage("Just checking that I'm getting sentry messages")
-	hub.CaptureException(fmt.Errorf("Just checking that I'm getting sentry errors"))
 
 	col := l.firestoreClient.Collection(collection)
 	if col == nil {

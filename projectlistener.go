@@ -52,6 +52,7 @@ type AppbutlerDoc struct {
 	ServiceType       string `firestore:"serviceType,omitempty"`
 	RegionCode        string `firestore:"regionCode,omitempty"`
 	CloudRunServiceId string `firestore:"cloudRunServiceId,omitempty"`
+	UpdateTime        time.Time
 }
 
 type ProjectListener struct {
@@ -62,6 +63,8 @@ type ProjectListener struct {
 	logger *zap.Logger
 
 	upstreamMap sync.Map
+
+	lastProcessedUpdateTime sync.Map
 }
 
 func NewProjectListener(logger *zap.Logger) (*ProjectListener, error) {
@@ -98,18 +101,38 @@ func (l *ProjectListener) Destruct() error {
 
 var _ caddy.Destructor = (*ProjectListener)(nil)
 
-func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
-	switch collection := doc.Ref.Parent.ID; collection {
-	case collectionProjects:
-		return l.ProcessProjectDoc(ctx, doc)
-	case collectionAppbutlers:
-		return l.ProcessAppbutlerDoc(ctx, doc)
-	default:
-		return fmt.Errorf("unexpected collection %s", collection)
+func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.DocumentSnapshot) (bool, error) {
+	collection := doc.Ref.Parent.ID
+	id := doc.Ref.ID
+
+	// Skip if this version of document was already processed,
+	// optimization because the firestore snapshot listener will
+	// return the entire collection again when just a few have changed
+	ut, ok := l.lastProcessedUpdateTime.Load(id)
+	if ok && ut.(time.Time).Equal(doc.UpdateTime) {
+		return false, nil
 	}
+
+	switch collection {
+	case collectionProjects:
+		if err := l.ProcessProjectDoc(ctx, doc); err != nil {
+			return false, err
+		}
+	case collectionAppbutlers:
+		if err := l.ProcessAppbutlerDoc(ctx, doc); err != nil {
+			return false, err
+		}
+	default:
+		return false, fmt.Errorf("unexpected collection %s", collection)
+	}
+
+	// Record last processed updatetime
+	l.lastProcessedUpdateTime.Store(id, doc.UpdateTime)
+	return true, nil
 }
 
 func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
+
 	// Parse partial appbutler document
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
@@ -151,32 +174,52 @@ func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.
 
 	// If this project has or will have an associated appbutler, delegate to ProcessAppbutlerDoc.
 	if data.EnableAppbutlers {
-		// l.logger.Debug(
-		// 	"Skipping project doc to use appbutler doc instead",
-		// 	zap.String("projectId", doc.Ref.ID),
-		// )
+		// Expected behaviour here
 		return nil
 	}
 
-	if data.Region == "" {
-		// I've migrated projects to always have region
-		return nil
-	}
-
-	if data.DevxUrl == "" {
-		// Only broken legacy projects that failed to create properly should have blank devxUrl,
-		// and new projects should have enableAppbutlers and stop above
-		return nil
-	}
-
-	// This should never happen now
+	// This should only happen rarely now, added to check that sentry even works
 	hub := sentry.GetHubFromContext(ctx)
 	hub.WithScope(func(scope *sentry.Scope) {
 		scope.SetTag("projectId", projectID)
 		scope.SetTag("region", data.Region)
 		scope.SetTag("devxUrl", data.DevxUrl)
 		scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
-		hub.CaptureMessage("ProcessProjectDoc is deprecated but still got here")
+		hub.CaptureException(fmt.Errorf("ProcessProjectDoc processing project without appbutlers"))
+	})
+
+	if data.DevxUrl == "" {
+		// Only broken legacy projects that failed to create properly should have blank devxUrl,
+		// and new projects should have enableAppbutlers and stop above
+		l.logger.Warn(
+			"Project doc without enableAppbutlers has no devxUrl",
+			zap.String("projectId", doc.Ref.ID),
+		)
+		return nil
+	}
+
+	if data.Region == "" {
+		// I've migrated projects to always have region
+		l.logger.Warn(
+			"Project doc without enableAppbutlers has no region",
+			zap.String("projectId", doc.Ref.ID),
+		)
+		return nil
+	}
+
+	l.logger.Error(
+		"Project doc without enableAppbutlers getting all the way to processing!",
+		zap.String("projectId", doc.Ref.ID),
+	)
+
+	// This should never happen now
+	hub = sentry.GetHubFromContext(ctx)
+	hub.WithScope(func(scope *sentry.Scope) {
+		scope.SetTag("projectId", projectID)
+		scope.SetTag("region", data.Region)
+		scope.SetTag("devxUrl", data.DevxUrl)
+		scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
+		hub.CaptureException(fmt.Errorf("ProcessProjectDoc is deprecated but still got here"))
 	})
 
 	// Set fallback region if missing, for projects before we added multiregion
@@ -276,10 +319,10 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 		return fmt.Errorf("could not get collection %s", collection)
 	}
 
-	// TODO: To scale, iterate over collection ordered by update time
-	//    and keep track of updatetime of last processed document?
-
 	log.Info("Starting query")
+
+	processedCount := 0
+	unprocessedCount := 0
 
 	it := col.Snapshots(ctx)
 
@@ -319,7 +362,7 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 			}
 
 			// Process a single document
-			if err := l.ProcessDoc(ctx, doc); err != nil {
+			if processed, err := l.ProcessDoc(ctx, doc); err != nil {
 				// Notify us of errors but keep going
 				hub.WithScope(func(scope *sentry.Scope) {
 					scope.SetTag("processedDocs", strconv.Itoa(docCount))
@@ -327,9 +370,19 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 					hub.CaptureException(err)
 				})
 				log.Error("ProcessDoc error", zap.Error(err), zap.String("collection", collection))
+			} else {
+				if processed {
+					processedCount += 1
+				} else {
+					unprocessedCount += 1
+				}
 			}
 		}
-		log.Debug("Processed documents in snapshot", zap.Int("documents", docCount))
+		log.Debug("Processed documents in snapshot",
+			zap.Int("documents", docCount),
+			zap.Int("processed", processedCount),
+			zap.Int("unprocessed", unprocessedCount),
+		)
 	}
 }
 

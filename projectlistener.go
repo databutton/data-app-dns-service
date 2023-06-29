@@ -321,9 +321,6 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 
 	log.Info("Starting query")
 
-	processedCount := 0
-	unprocessedCount := 0
-
 	it := col.Snapshots(ctx)
 
 	for {
@@ -340,6 +337,8 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 		}
 
 		docCount := 0
+		processedCount := 0
+		unprocessedCount := 0
 		for {
 			docCount++
 			doc, err := snap.Documents.Next()
@@ -378,11 +377,13 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 				}
 			}
 		}
-		log.Debug("Processed documents in snapshot",
+		log.Info("Processed documents in snapshot",
 			zap.Int("documents", docCount),
 			zap.Int("processed", processedCount),
 			zap.Int("unprocessed", unprocessedCount),
 		)
+		// TODO: Pause a second here to avoid overloading the service when getting rapid updates?
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

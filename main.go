@@ -189,38 +189,6 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			zap.Int("upstreamsCount", listener.Count()),
 		)
 
-		logger.Info("Starting project listener goroutine")
-		startTime = time.Now()
-		projectsInitWg := new(sync.WaitGroup)
-		projectsInitWg.Add(1)
-		go func() {
-			ctx, cancel := context.WithCancel(listener.ctx)
-			defer cancel()
-
-			ctx = sentry.SetHubOnContext(ctx, d.hub.Clone())
-			hub := sentry.GetHubFromContext(ctx)
-
-			// This should run forever
-			err := listener.RunWithoutCrashing(ctx, collectionProjects, projectsInitWg)
-			if err != nil {
-				hub.CaptureException(err)
-			}
-
-			// Panic in a goroutine kills the program abruptly, do that
-			// unless we were canceled, such that the service restarts.
-			// Perhaps there is a nicer way to shut down caddy, we'll see in prod...
-			if !errors.Is(ctx.Err(), context.Canceled) {
-				hub.CaptureException(ctx.Err())
-				panic(fmt.Errorf("run failed with error: %v", err))
-			}
-		}()
-		projectsInitWg.Wait()
-		initialSyncTime = time.Since(startTime)
-		logger.Info("Launched projects listener",
-			zap.Duration("loadTime", initialSyncTime),
-			zap.Int("upstreamsCount", listener.Count()),
-		)
-
 		return listener, nil
 	})
 	if err != nil {

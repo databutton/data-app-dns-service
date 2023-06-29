@@ -10,7 +10,6 @@ import (
 	"cloud.google.com/go/firestore"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/getsentry/sentry-go"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
@@ -31,19 +30,6 @@ const (
 	collectionProjects   = "projects"
 	collectionAppbutlers = "appbutlers"
 )
-
-// Partial Project document to be parsed from firestore document
-type ProjectDoc struct {
-	// Legacy projects will have the region here
-	Region string `firestore:"region,omitempty"`
-
-	// Legacy projects will have this set unless in broken state
-	DevxUrl string `firestore:"devxUrl,omitempty"`
-
-	// During a migration period, new projects will need to set
-	// this on creation to use appbutlers for service creation
-	EnableAppbutlers bool `firestore:"enableAppbutlers,omitempty"`
-}
 
 // Partial Appbutler document to be parsed from firestore document
 type AppbutlerDoc struct {
@@ -103,6 +89,10 @@ var _ caddy.Destructor = (*ProjectListener)(nil)
 
 func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.DocumentSnapshot) (bool, error) {
 	collection := doc.Ref.Parent.ID
+	if collection != collectionAppbutlers {
+		return false, fmt.Errorf("unexpected collection %s", collection)
+	}
+
 	id := doc.Ref.ID
 
 	// Skip if this version of document was already processed,
@@ -113,17 +103,8 @@ func (l *ProjectListener) ProcessDoc(ctx context.Context, doc *firestore.Documen
 		return false, nil
 	}
 
-	switch collection {
-	case collectionProjects:
-		if err := l.ProcessProjectDoc(ctx, doc); err != nil {
-			return false, err
-		}
-	case collectionAppbutlers:
-		if err := l.ProcessAppbutlerDoc(ctx, doc); err != nil {
-			return false, err
-		}
-	default:
-		return false, fmt.Errorf("unexpected collection %s", collection)
+	if err := l.ProcessAppbutlerDoc(ctx, doc); err != nil {
+		return false, err
 	}
 
 	// Record last processed updatetime
@@ -160,96 +141,6 @@ func (l *ProjectListener) ProcessAppbutlerDoc(ctx context.Context, doc *firestor
 	err := l.StoreUpstream(data.ServiceType, data.ProjectId, data.RegionCode, data.CloudRunServiceId)
 	if err != nil {
 		return err
-	}
-	return nil
-}
-
-func (l *ProjectListener) ProcessProjectDoc(ctx context.Context, doc *firestore.DocumentSnapshot) error {
-	// Parse partial project document
-	var data ProjectDoc
-	if err := doc.DataTo(&data); err != nil {
-		return err
-	}
-	projectID := doc.Ref.ID
-
-	// If this project has or will have an associated appbutler, delegate to ProcessAppbutlerDoc.
-	if data.EnableAppbutlers {
-		// Expected behaviour here
-		return nil
-	}
-
-	// GOT THIS:
-	// This should only happen rarely now, added to check that sentry even works
-	// hub := sentry.GetHubFromContext(ctx)
-	// hub.WithScope(func(scope *sentry.Scope) {
-	// 	scope.SetTag("projectId", projectID)
-	// 	scope.SetTag("region", data.Region)
-	// 	scope.SetTag("devxUrl", data.DevxUrl)
-	// 	scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
-	// 	hub.CaptureException(fmt.Errorf("ProcessProjectDoc processing project without appbutlers"))
-	// })
-
-	if data.DevxUrl == "" {
-		// GOT THIS
-		// Only broken legacy projects that failed to create properly should have blank devxUrl,
-		// and new projects should have enableAppbutlers and stop above
-		l.logger.Warn(
-			"Project doc without enableAppbutlers has no devxUrl",
-			zap.String("projectId", doc.Ref.ID),
-		)
-		return nil
-	}
-
-	if data.Region == "" {
-		// DID NOT GET THIS
-		// I've migrated projects to always have region
-		l.logger.Warn(
-			"Project doc without enableAppbutlers has no region",
-			zap.String("projectId", doc.Ref.ID),
-		)
-		return nil
-	}
-
-	// DID NOT GET THIS
-	l.logger.Error(
-		"Project doc without enableAppbutlers getting all the way to processing!",
-		zap.String("projectId", doc.Ref.ID),
-	)
-
-	// DID NOT GET THIS:
-	// This should never happen now
-	hub := sentry.GetHubFromContext(ctx)
-	hub.WithScope(func(scope *sentry.Scope) {
-		scope.SetTag("projectId", projectID)
-		scope.SetTag("region", data.Region)
-		scope.SetTag("devxUrl", data.DevxUrl)
-		scope.SetTag("enableAppbutlers", fmt.Sprintf("%v", data.EnableAppbutlers))
-		hub.CaptureException(fmt.Errorf("ProcessProjectDoc is deprecated but still got here"))
-	})
-
-	// Set fallback region if missing, for projects before we added multiregion
-	region := data.Region
-	if region == "" {
-		region = "europe-west1"
-	}
-
-	// Look up short region code and fail if unknown
-	regionCode, ok := REGION_LOOKUP_MAP[region]
-	if !ok {
-		l.logger.Error("Could not find project region", zap.String("region", region))
-		err := fmt.Errorf("could not find project region %s", region)
-		hub := sentry.GetHubFromContext(ctx).Clone()
-		hub.CaptureException(err)
-		return errors.Wrapf(ErrInvalidRegion, "Region=%s", region)
-	}
-
-	// Add both devx and prodx to mapping
-	for _, serviceType := range []string{"devx", "prodx"} {
-		serviceId := fmt.Sprintf("%s-%s", serviceType, projectID)
-		err := l.StoreUpstream(serviceType, projectID, regionCode, serviceId)
-		if err != nil {
-			return err
-		}
 	}
 	return nil
 }

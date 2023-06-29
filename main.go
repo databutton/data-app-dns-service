@@ -138,7 +138,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	d.usageKeys = append(d.usageKeys, sentryInitUsagePoolKey)
 
 	// Clone a sentry hub for this module instance
-	d.hub = sentry.NewHub(nil, sentry.NewScope())
+	d.hub = sentry.CurrentHub().Clone()
 	d.hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTag("provisioningStartedAt", time.Now().UTC().Format(time.RFC3339))
 	})
@@ -164,12 +164,11 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			ctx, cancel := context.WithCancel(listener.ctx)
 			defer cancel()
 
-			hub := d.hub.Clone()
-			ctx = sentry.SetHubOnContext(ctx, hub)
+			ctx = sentry.SetHubOnContext(ctx, d.hub.Clone())
+			hub := sentry.GetHubFromContext(ctx)
 
 			// This should run forever
 			err := listener.RunWithoutCrashing(ctx, collectionAppbutlers, appbutlersInitWg)
-
 			if err != nil {
 				hub.CaptureException(err)
 			}
@@ -179,7 +178,8 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			// Perhaps there is a nicer way to shut down caddy, we'll see in prod...
 			if !errors.Is(ctx.Err(), context.Canceled) {
 				hub.CaptureException(ctx.Err())
-				panic(err)
+				sentry.Flush(2 * time.Second)
+				panic(fmt.Errorf("run failed with error: %v", err))
 			}
 		}()
 		appbutlersInitWg.Wait()
@@ -197,12 +197,11 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			ctx, cancel := context.WithCancel(listener.ctx)
 			defer cancel()
 
-			hub := d.hub.Clone()
-			ctx = sentry.SetHubOnContext(ctx, hub)
+			ctx = sentry.SetHubOnContext(ctx, d.hub.Clone())
+			hub := sentry.GetHubFromContext(ctx)
 
 			// This should run forever
 			err := listener.RunWithoutCrashing(ctx, collectionProjects, projectsInitWg)
-
 			if err != nil {
 				hub.CaptureException(err)
 			}
@@ -212,7 +211,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			// Perhaps there is a nicer way to shut down caddy, we'll see in prod...
 			if !errors.Is(ctx.Err(), context.Canceled) {
 				hub.CaptureException(ctx.Err())
-				panic(err)
+				panic(fmt.Errorf("run failed with error: %v", err))
 			}
 		}()
 		projectsInitWg.Wait()

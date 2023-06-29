@@ -312,7 +312,8 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetTag("collection", collection)
 	})
-	hub.CaptureMessage("Just checking that I'm getting the new release!")
+	hub.CaptureMessage("Just checking that I'm getting sentry messages")
+	hub.CaptureException(fmt.Errorf("Just checking that I'm getting sentry errors"))
 
 	col := l.firestoreClient.Collection(collection)
 	if col == nil {
@@ -336,11 +337,11 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 			return err
 		}
 
-		docCount := 0
-		processedCount := 0
-		unprocessedCount := 0
+		countDocs := 0
+		countProcessed := 0
+		countSkipped := 0
+		countErrors := 0
 		for {
-			docCount++
 			doc, err := snap.Documents.Next()
 
 			if err == iterator.Done {
@@ -353,7 +354,7 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 			} else if err != nil {
 				// Notify us and fail
 				hub.WithScope(func(scope *sentry.Scope) {
-					scope.SetTag("processedDocs", strconv.Itoa(docCount))
+					scope.SetTag("processedDocs", strconv.Itoa(countDocs))
 					hub.CaptureException(err)
 				})
 				log.Error("Documents.Next error", zap.Error(err), zap.String("collection", collection))
@@ -364,26 +365,35 @@ func (l *ProjectListener) RunUntilCanceled(ctx context.Context, collection strin
 			if processed, err := l.ProcessDoc(ctx, doc); err != nil {
 				// Notify us of errors but keep going
 				hub.WithScope(func(scope *sentry.Scope) {
-					scope.SetTag("processedDocs", strconv.Itoa(docCount))
 					scope.SetTag("id", doc.Ref.ID)
+					scope.SetTag("docsCount", strconv.Itoa(countDocs))
+					scope.SetTag("docsProcessed", strconv.Itoa(countProcessed))
+					scope.SetTag("docsSkipped", strconv.Itoa(countSkipped))
+					scope.SetTag("docsFailed", strconv.Itoa(countErrors))
 					hub.CaptureException(err)
 				})
 				log.Error("ProcessDoc error", zap.Error(err), zap.String("collection", collection))
+				countErrors += 1
+			} else if processed {
+				countProcessed += 1
 			} else {
-				if processed {
-					processedCount += 1
-				} else {
-					unprocessedCount += 1
-				}
+				countSkipped += 1
 			}
+
+			// Count all
+			countDocs++
 		}
+
 		log.Info("Processed documents in snapshot",
-			zap.Int("documents", docCount),
-			zap.Int("processed", processedCount),
-			zap.Int("unprocessed", unprocessedCount),
+			zap.Int("docsCount", countDocs),
+			zap.Int("docsProcessed", countProcessed),
+			zap.Int("docsSkipped", countSkipped),
+			zap.Int("docsFailed", countErrors),
 		)
-		// TODO: Pause a second here to avoid overloading the service when getting rapid updates?
-		time.Sleep(20 * time.Millisecond)
+
+		// Pause a little bit here to avoid overloading
+		// the service when getting rapid updates
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -396,6 +406,7 @@ func (l *ProjectListener) RunWithoutCrashing(ctx context.Context, collection str
 		scope.SetTag("collection", collection)
 		scope.SetTag("startTime", time.Now().UTC().Format(time.RFC3339))
 	})
+	ctx = sentry.SetHubOnContext(ctx, hub)
 
 	startTime := time.Now()
 	err := DontPanic(func() error {

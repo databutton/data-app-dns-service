@@ -37,8 +37,7 @@ const (
 	sentryInitUsagePoolKey       = "sentryInit"
 )
 
-type SentryDestructor struct {
-}
+type SentryDestructor struct{}
 
 func (SentryDestructor) Destruct() error {
 	// Flush buffered events before the program terminates.
@@ -72,7 +71,7 @@ func initSentry(logger *zap.Logger) error {
 type DevxUpstreams struct {
 	hub       *sentry.Hub
 	logger    *zap.Logger
-	listener  *ProjectListener
+	listener  *Listener
 	usageKeys []string
 }
 
@@ -168,7 +167,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			hub := sentry.GetHubFromContext(ctx)
 
 			// This should run forever
-			err := listener.RunWithoutCrashing(ctx, collectionAppbutlers, appbutlersInitWg)
+			err := listener.RunWithoutCrashing(ctx, appbutlersInitWg)
 			if err != nil {
 				hub.CaptureException(err)
 			}
@@ -200,7 +199,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		d.hub.CaptureException(err)
 		return err
 	}
-	d.listener = listener.(*ProjectListener)
+	d.listener = listener.(*Listener)
 	d.usageKeys = append(d.usageKeys, projectsListenerUsagePoolKey)
 
 	d.logger.Info("Provision done",
@@ -228,7 +227,6 @@ func (d *DevxUpstreams) Validate() error {
 // Decrements usagePool counters which eventually
 // leads to their destructors being called.
 func (d *DevxUpstreams) Cleanup() error {
-
 	var allErrors []error
 	for _, key := range d.usageKeys {
 		// Catch panic from Delete in case we have a bug and decrement too many times

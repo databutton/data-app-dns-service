@@ -263,6 +263,16 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 
+	if serviceType == "prodx" {
+		customBaseUrl := r.Header.Get("x-dbtn-baseurl")
+
+		// FIXME: This should be a cached firestore lookup
+		switch customBaseUrl {
+		case "custom.dbtn.com":
+			projectID = "9c089241-c851-4351-8f0c-7bfe994d8e87"
+		}
+	}
+
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
 	if upstream == "" {

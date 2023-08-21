@@ -265,14 +265,15 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 
 	if serviceType == "prodx" {
 		customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
-		if customBaseUrl != "" {
-			d.logger.Info("Got custom base url", zap.String("customBaseUrl", customBaseUrl))
-		}
 
 		// FIXME: This should be a cached firestore lookup
 		switch customBaseUrl {
 		case "custom.dbtn.app":
 			projectID = "9c089241-c851-4351-8f0c-7bfe994d8e87"
+		}
+
+		if customBaseUrl != "" {
+			d.dumpDebugInfoToSentry("Got custom base url", r, projectID)
 		}
 	}
 
@@ -324,7 +325,9 @@ func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType 
 
 		// TODO: This doesn't seem to be available
 		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
+
 		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
+		scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
 
 		scope.SetTag("projectId", projectID)
 		scope.SetTag("serviceType", serviceType)
@@ -338,6 +341,29 @@ func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType 
 	)
 
 	return err
+}
+
+func (d *DevxUpstreams) dumpDebugInfoToSentry(msg string, r *http.Request, projectID string) {
+	// Clone hub for thread safety, this is in the scope of a single request
+	hub := d.hub.Clone()
+
+	// Add some request context for the error
+	hub.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelDebug)
+
+		// This seems to set the url to something missing the project part in the middle
+		scope.SetRequest(r)
+
+		// TODO: This doesn't seem to be available
+		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
+
+		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
+		scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
+
+		scope.SetTag("projectId", projectID)
+	})
+
+	hub.CaptureMessage(msg)
 }
 
 // Interface guards

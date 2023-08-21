@@ -84,7 +84,8 @@ func makeKey(serviceType, projectId string) string {
 // The rest of this Listener code is basically written to support this fast lookup.
 func (l *Listener) LookupUpUrl(projectID, serviceType string) string {
 	upstreams := l.GetUpstreams()
-	return upstreams[makeKey(serviceType, projectID)]
+	key := makeKey(serviceType, projectID)
+	return upstreams[key]
 }
 
 // StoreToMap adds an entry to the upstreams map for the appbutler doc

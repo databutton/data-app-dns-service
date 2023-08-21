@@ -255,6 +255,15 @@ func (d *DevxUpstreams) Cleanup() error {
 	return nil
 }
 
+func (d *DevxUpstreams) getProjectIdForCustomDomain(customBaseUrl string) (string, error) {
+	// TODO: This should be a cached firestore lookup, for the moment we just hardcode it
+	switch customBaseUrl {
+	case "custom.dbtn.app":
+		return "9c089241-c851-4351-8f0c-7bfe994d8e87", nil
+	}
+	return "", fmt.Errorf("missing projectId for custom domain %s", customBaseUrl)
+}
+
 // GetUpstreams implements reverseproxy.UpstreamSource.
 //
 // This is what's called for every request.
@@ -262,28 +271,30 @@ func (d *DevxUpstreams) Cleanup() error {
 func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
+	customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
 
-	if serviceType == "prodx" {
-		customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
-
-		// FIXME: This should be a cached firestore lookup
-		switch customBaseUrl {
-		case "custom.dbtn.app":
-			projectID = "9c089241-c851-4351-8f0c-7bfe994d8e87"
+	if customBaseUrl != "" && serviceType == "prodx" {
+		customProjectID, err := d.getProjectIdForCustomDomain(customBaseUrl)
+		if err != nil {
+			d.dumpDebugInfoToSentry(err, r)
+			return nil, err
 		}
 
-		if customBaseUrl != "" && projectID != "" {
-			r.Header.Add("X-Databutton-Project-Id", projectID)
+		projectID = customProjectID
 
-			// TODO: This is really messy! Clean up across the board!
-			databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
-			r.Header.Add("X-Dbtn-Baseurl-Prefix", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
-			r.Header.Add("X-Original-Path", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
-		}
+		databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
+		r.Header.Add("X-Original-Path", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
+		r.Header.Add("X-Databutton-Project-Id", projectID)
 
-		if customBaseUrl != "" {
-			d.dumpDebugInfoToSentry("Got custom base url", r, projectID)
-		}
+		// TODO: Be clearer on which parts of path are hosting specific
+		// (differs between dev workspace, regular deployed, deployed to custom domain)
+		// and which are relative to the served app.
+		// This needs to be consistently handled across all services. E.g.:
+		// r.Header.Add("X-Dbtn-App-Intpath", databuttonAppBasePath)
+		// r.Header.Add("X-Dbtn-App-Extpath", "/")
+		// r.Header.Add("X-Dbtn-App-Path", r.URL.Path)
+
+		// Continue to look up upstreams as normal
 	}
 
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
@@ -352,9 +363,12 @@ func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType 
 	return err
 }
 
-func (d *DevxUpstreams) dumpDebugInfoToSentry(msg string, r *http.Request, projectID string) {
+func (d *DevxUpstreams) dumpDebugInfoToSentry(err error, r *http.Request) {
 	// Clone hub for thread safety, this is in the scope of a single request
 	hub := d.hub.Clone()
+
+	// Doesn't matter if this is a bit slow
+	defer hub.Flush(2 * time.Second)
 
 	// Add some request context for the error
 	hub.ConfigureScope(func(scope *sentry.Scope) {
@@ -362,17 +376,9 @@ func (d *DevxUpstreams) dumpDebugInfoToSentry(msg string, r *http.Request, proje
 
 		// This seems to set the url to something missing the project part in the middle
 		scope.SetRequest(r)
-
-		// TODO: This doesn't seem to be available
-		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
-
-		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
-		scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
-
-		scope.SetTag("projectId", projectID)
 	})
 
-	hub.CaptureMessage(msg)
+	hub.CaptureException(err)
 }
 
 // Interface guards

@@ -255,15 +255,6 @@ func (d *DevxUpstreams) Cleanup() error {
 	return nil
 }
 
-func (d *DevxUpstreams) getProjectIdForCustomDomain(customBaseUrl string) (string, error) {
-	// TODO: This should be a cached firestore lookup, for the moment we just hardcode it
-	switch customBaseUrl {
-	case "custom.dbtn.app":
-		return "9c089241-c851-4351-8f0c-7bfe994d8e87", nil
-	}
-	return "", fmt.Errorf("missing projectId for custom domain %s", customBaseUrl)
-}
-
 // GetUpstreams implements reverseproxy.UpstreamSource.
 //
 // This is what's called for every request.
@@ -274,7 +265,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
 
 	if customBaseUrl != "" && serviceType == "prodx" {
-		customProjectID, err := d.getProjectIdForCustomDomain(customBaseUrl)
+		customProjectID, err := getProjectIdForCustomDomain(customBaseUrl)
 		if err != nil {
 			d.dumpDebugInfoToSentry(err, r)
 			return nil, err

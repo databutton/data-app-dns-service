@@ -274,6 +274,11 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 
 		if customBaseUrl != "" && projectID != "" {
 			r.Header.Add("X-Databutton-Project-Id", projectID)
+
+			// TODO: This is really messy! Clean up across the board!
+			databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
+			r.Header.Add("X-Dbtn-Baseurl-Prefix", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
+			r.Header.Add("X-Original-Path", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
 		}
 
 		if customBaseUrl != "" {

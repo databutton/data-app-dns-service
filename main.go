@@ -272,6 +272,10 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 			projectID = "9c089241-c851-4351-8f0c-7bfe994d8e87"
 		}
 
+		if customBaseUrl != "" && projectID != "" {
+			r.Header.Add("X-Databutton-Project-Id", projectID)
+		}
+
 		if customBaseUrl != "" {
 			d.dumpDebugInfoToSentry("Got custom base url", r, projectID)
 		}

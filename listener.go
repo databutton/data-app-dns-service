@@ -30,6 +30,11 @@ type AppbutlerDoc struct {
 	ServiceIsReady    bool   `firestore:"serviceIsReady,omitempty"`
 }
 
+// Partial Domain document to be parsed from firestore document
+type DomainDoc struct {
+	ProjectId string `firestore:"projectId"`
+}
+
 type Listener struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -91,6 +96,25 @@ func (l *Listener) LookupUpUrl(projectID, serviceType string) string {
 // StoreToMap adds an entry to the upstreams map for the appbutler doc
 func (l *Listener) StoreToMap(data AppbutlerDoc, upstreams map[string]string) {
 	upstreams[makeKey(data.ServiceType, data.ProjectId)] = l.MakeUrl(data)
+}
+
+// Look up project id for a custom domain
+func (l *Listener) GetProjectIdForCustomDomain(ctx context.Context, customBaseUrl string) (string, error) {
+	// FIXME: Optimize this by adding a /domains listener, just getting proof of concept up and running
+
+	doc := l.firestoreClient.Doc(fmt.Sprintf("/domains/%s", customBaseUrl))
+	ref, err := doc.Get(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	var domain DomainDoc
+	err = ref.DataTo(&domain)
+	if err != nil {
+		return "", err
+	}
+
+	return domain.ProjectId, nil
 }
 
 // SkipDoc returns true if the document should be skipped over when building the upstreams map

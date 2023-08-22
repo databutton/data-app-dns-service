@@ -265,18 +265,19 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
 
 	if customBaseUrl != "" && serviceType == "prodx" {
-		customProjectID, err := getProjectIdForCustomDomain(customBaseUrl)
+		customProjectID, err := d.listener.GetProjectIdForCustomDomain(r.Context(), customBaseUrl)
 		if err != nil {
 			d.dumpDebugInfoToSentry(err, r)
 			return nil, err
 		}
 
+		// Use this project id
 		projectID = customProjectID
-
-		databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
-		r.Header.Add("X-Original-Path", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
 		r.Header.Add("X-Databutton-Project-Id", projectID)
 
+		// Emulate what we already do for regular prodx deploys
+		databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
+		r.Header.Add("X-Original-Path", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
 		// TODO: Be clearer on which parts of path are hosting specific
 		// (differs between dev workspace, regular deployed, deployed to custom domain)
 		// and which are relative to the served app.
@@ -296,14 +297,6 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 		//   until we can remove the project listener to simplify here
 		return nil, d.upstreamMissing(r, projectID, serviceType)
 	}
-
-	// Dropping this since it's so noisy
-	// d.logger.Debug(
-	// 	"Got upstream",
-	// 	zap.String("upstream", upstream),
-	// 	zap.String("projectID", projectID),
-	// 	zap.String("serviceType", serviceType),
-	// )
 
 	return []*reverseproxy.Upstream{
 		{

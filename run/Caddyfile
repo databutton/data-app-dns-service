@@ -4,12 +4,12 @@
 }
 
 (cors) {
-	@origin{args.0} header Origin {args.0}
-	header @origin{args.0} Access-Control-Allow-Origin "{args.0}"
-	header @origin{args.0} Access-Control-Allow-Headers "content-type, x-request-id, authorization, x-dbtn-webapp-version"
-	header @origin{args.0} Vary Origin
-	header @origin{args.0} Access-Control-Allow-Methods "POST, GET, PATCH, PUT, OPTIONS, DELETE"
-	header @origin{args.0} Access-Control-Allow-Credentials "true"
+	@origin{args[0]} header Origin {args[0]}
+	header @origin{args[0]} Access-Control-Allow-Origin "{args[0]}"
+	header @origin{args[0]} Access-Control-Allow-Headers "content-type, x-request-id, authorization, x-dbtn-webapp-version"
+	header @origin{args[0]} Vary Origin
+	header @origin{args[0]} Access-Control-Allow-Methods "POST, GET, PATCH, PUT, OPTIONS, DELETE"
+	header @origin{args[0]} Access-Control-Allow-Credentials "true"
 }
 
 :{$PORT:8080} {

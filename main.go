@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -142,12 +140,12 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		scope.SetTag("provisioningStartedAt", time.Now().UTC().Format(time.RFC3339))
 	})
 
-	// Initialize the firestore cache (launches goroutine only once)
+	// Initialize the firestore cache (launches goroutines only once)
 	startTime := time.Now()
 	listener, listenerLoaded, err := usagePool.LoadOrNew(projectsListenerUsagePoolKey, func() (caddy.Destructor, error) {
-		d.logger.Info("Creating project listener")
+		d.logger.Info("Initializing firestore listeners")
 
-		// FIXME: Create a logger not associated with the caddy module instance
+		// Should we create a logger not associated with the caddy module instance? Seems to work fine.
 		logger := d.logger.With(zap.String("context", "projectsListener"))
 
 		listener, err := NewProjectListener(logger)
@@ -155,38 +153,38 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 			return listener, err
 		}
 
-		logger.Info("Starting appbutler listener goroutine")
-		startTime := time.Now()
-		appbutlersInitWg := new(sync.WaitGroup)
-		appbutlersInitWg.Add(1)
-		go func() {
-			ctx, cancel := context.WithCancel(listener.ctx)
+		runListener := func(ctx context.Context, collection string, initWg *sync.WaitGroup) {
+			ctx, cancel := context.WithCancel(ctx)
 			defer cancel()
 
-			ctx = sentry.SetHubOnContext(ctx, d.hub.Clone())
-			hub := sentry.GetHubFromContext(ctx)
+			hub := d.hub.Clone()
+			ctx = sentry.SetHubOnContext(ctx, hub)
 
-			// This should run forever
-			err := listener.RunWithoutCrashing(ctx, appbutlersInitWg)
-			if err != nil {
-				hub.CaptureException(err)
+			// This should run forever or until canceled...
+			err := listener.RunListener(ctx, initWg, collection)
+
+			// Graceful cancellation
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return
 			}
 
-			// Panic in a goroutine kills the program abruptly, do that
+			// Panic in a goroutine kills the program abruptly, lets do that
 			// unless we were canceled, such that the service restarts.
-			// Perhaps there is a nicer way to shut down caddy, we'll see in prod...
-			if !errors.Is(ctx.Err(), context.Canceled) {
-				hub.CaptureException(ctx.Err())
-				sentry.Flush(2 * time.Second)
-				panic(fmt.Errorf("run failed with error: %v", err))
-			}
-		}()
+			hub.CaptureException(err)
+			sentry.Flush(2 * time.Second)
+			panic(fmt.Errorf("run failed with error: %v", err))
+		}
+
+		appbutlersInitWg := new(sync.WaitGroup)
+		appbutlersInitWg.Add(1)
+		go runListener(listener.ctx, collectionAppbutlers, appbutlersInitWg)
+
+		domainsInitWg := new(sync.WaitGroup)
+		domainsInitWg.Add(1)
+		go runListener(listener.ctx, collectionDomains, domainsInitWg)
+
+		domainsInitWg.Wait()
 		appbutlersInitWg.Wait()
-		initialSyncTime := time.Since(startTime)
-		logger.Info("Appbutlers listener first sync completed",
-			zap.Duration("loadTime", initialSyncTime),
-			zap.Int("upstreamsCount", listener.Count()),
-		)
 
 		return listener, nil
 	})
@@ -204,11 +202,9 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 
 	d.logger.Info("Provision done",
 		zap.Duration("loadTime", time.Since(startTime)),
-		zap.Int("upstreamsCount", d.listener.Count()),
+		zap.Int("upstreamsCount", d.listener.CountUpstreams()),
+		zap.Int("domainsCount", d.listener.CountDomains()),
 	)
-
-	// Dump all map contents for inspection
-	// d.listener.Dump()
 
 	return nil
 }
@@ -239,7 +235,9 @@ func (d *DevxUpstreams) Cleanup() error {
 			)
 			return err
 		})
-		allErrors = append(allErrors, err)
+		if err != nil {
+			allErrors = append(allErrors, err)
+		}
 	}
 
 	// Capture shutdown errors to sentry, just so we know if it happens.
@@ -248,10 +246,12 @@ func (d *DevxUpstreams) Cleanup() error {
 			hub.CaptureException(err)
 		}
 	}
+
 	if len(allErrors) > 0 {
-		d.logger.Warn("Errors during shutdown, see sentry")
+		d.logger.Warn("Errors during shutdown, see sentry", zap.Errors("errors", allErrors))
 		return fmt.Errorf("%v", allErrors)
 	}
+
 	return nil
 }
 
@@ -264,6 +264,8 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 	customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
 
+	originalPath := ""
+
 	if customBaseUrl != "" && serviceType == "prodx" {
 		customProjectID, err := d.listener.GetProjectIdForCustomDomain(r.Context(), customBaseUrl)
 		if err != nil {
@@ -273,30 +275,32 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 
 		// Use this project id
 		projectID = customProjectID
-		r.Header.Add("X-Databutton-Project-Id", projectID)
 
 		// Emulate what we already do for regular prodx deploys
 		databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
-		r.Header.Add("X-Original-Path", fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path))
-		// TODO: Be clearer on which parts of path are hosting specific
-		// (differs between dev workspace, regular deployed, deployed to custom domain)
-		// and which are relative to the served app.
-		// This needs to be consistently handled across all services. E.g.:
-		// r.Header.Add("X-Dbtn-App-Intpath", databuttonAppBasePath)
-		// r.Header.Add("X-Dbtn-App-Extpath", "/")
-		// r.Header.Add("X-Dbtn-App-Path", r.URL.Path)
+		originalPath = fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path)
 
 		// Continue to look up upstreams as normal
 	}
 
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
+	// If not found, try a direct firestore lookup?
+	// (not doing this now, it could be a sign of hibernated
+	// or deleted apps still getting traffic,
+	// and we don't want those cases spamming firestore)
+	// if upstream == "" {
+	//   upstream = d.listener.LookUpUrlDirectly(projectID, serviceType)
+	// }
+
 	if upstream == "" {
-		// TODO: If this stays a little flaky we could try to fetch
-		//   the appbutler document directly here, but lets delay that
-		//   until we can remove the project listener to simplify here
-		return nil, d.upstreamMissing(r, projectID, serviceType)
+		return nil, d.upstreamMissing(r, projectID, serviceType, customBaseUrl)
 	}
+
+	if originalPath != "" {
+		r.Header.Add("X-Original-Path", originalPath)
+	}
+	r.Header.Add("X-Databutton-Project-Id", projectID)
 
 	return []*reverseproxy.Upstream{
 		{
@@ -306,7 +310,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 }
 
 // This should happen rarely, report as much as possible to track why
-func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType string) error {
+func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType, customBaseUrl string) error {
 	var err error
 	switch {
 	case projectID == "":
@@ -317,31 +321,33 @@ func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType 
 		err = ErrUpstreamNotFound
 	}
 
-	// Clone hub for thread safety, this is in the scope of a single request
-	hub := d.hub.Clone()
+	// // Clone hub for thread safety, this is in the scope of a single request
+	// hub := d.hub.Clone()
+	//
+	// // Add some request context for the error
+	// hub.ConfigureScope(func(scope *sentry.Scope) {
+	// 	scope.SetLevel(sentry.LevelError)
+	//
+	// 	// This seems to set the url to something missing the project part in the middle
+	// 	scope.SetRequest(r)
+	//
+	// 	// TODO: This doesn't seem to be available
+	// 	scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
+	//
+	// 	scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
+	// 	scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
+	//
+	// 	scope.SetTag("projectId", projectID)
+	// 	scope.SetTag("serviceType", serviceType)
+	// })
+	// hub.CaptureException(err)
 
-	// Add some request context for the error
-	hub.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetLevel(sentry.LevelError)
-
-		// This seems to set the url to something missing the project part in the middle
-		scope.SetRequest(r)
-
-		// TODO: This doesn't seem to be available
-		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
-
-		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
-		scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
-
-		scope.SetTag("projectId", projectID)
-		scope.SetTag("serviceType", serviceType)
-	})
-	hub.CaptureException(err)
-
-	d.logger.Error(
+	d.logger.Warn(
 		"Failed to get upstream",
 		zap.String("projectID", projectID),
 		zap.String("serviceType", serviceType),
+		zap.String("customBaseUrl", customBaseUrl),
+		zap.Error(err),
 	)
 
 	return err

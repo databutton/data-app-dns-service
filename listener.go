@@ -101,8 +101,12 @@ func (l *Listener) StoreToMap(data AppbutlerDoc, upstreams map[string]string) {
 // Look up project id for a custom domain
 func (l *Listener) GetProjectIdForCustomDomain(ctx context.Context, customBaseUrl string) (string, error) {
 	// FIXME: Optimize this by adding a /domains listener, just getting proof of concept up and running
+	pathRef := fmt.Sprintf("domains/%s", customBaseUrl)
 
-	doc := l.firestoreClient.Doc(fmt.Sprintf("/domains/%s", customBaseUrl))
+	doc := l.firestoreClient.Doc(pathRef)
+	if doc == nil {
+		return "", fmt.Errorf("invalid doc reference %s", pathRef)
+	}
 	ref, err := doc.Get(ctx)
 	if err != nil {
 		return "", err

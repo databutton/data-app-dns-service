@@ -4,7 +4,7 @@ go 1.21.3
 
 require (
 	cloud.google.com/go/firestore v1.14.0
-	github.com/caddyserver/caddy/v2 v2.7.5
+	github.com/caddyserver/caddy/v2 v2.7.4
 	github.com/getsentry/sentry-go v0.25.0
 	go.uber.org/zap v1.26.0
 	google.golang.org/api v0.148.0

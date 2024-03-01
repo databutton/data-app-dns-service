@@ -30,6 +30,7 @@ type AppbutlerDoc struct {
 	RegionCode        string `firestore:"regionCode,omitempty"`
 	CloudRunServiceId string `firestore:"cloudRunServiceId,omitempty"`
 	ServiceIsReady    bool   `firestore:"serviceIsReady,omitempty"`
+	OverrideURL       string `firestore:"overrideURL,omitempty"`
 }
 
 // Partial Domain document to be parsed from firestore document
@@ -153,13 +154,21 @@ func (l *Listener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.Docum
 		return fmt.Errorf("missing serviceType")
 	} else if data.RegionCode == "" {
 		return fmt.Errorf("missing regionCode")
-	} else if data.CloudRunServiceId == "" {
+	} else if data.CloudRunServiceId == "" && data.OverrideURL == "" { // Updated this line to check for OverrideURL as well
 		return fmt.Errorf("missing cloudRunServiceId")
 	}
 
 	key := makeKey(data.ServiceType, data.ProjectId)
-	url := fmt.Sprintf("%s-%s-%s.a.run.app:443", data.CloudRunServiceId, GCP_PROJECT_HASH, data.RegionCode)
-	upstreams[key] = url
+
+	// Check if overrideURL is provided and non-empty
+	if data.OverrideURL != "" {
+		// Use the overrideURL instead of generating one
+		upstreams[key] = data.OverrideURL
+	} else {
+		// Original URL generation logic
+		url := fmt.Sprintf("%s-%s-%s.a.run.app:443", data.CloudRunServiceId, GCP_PROJECT_HASH, data.RegionCode)
+		upstreams[key] = url
+	}
 
 	return nil
 }

@@ -295,7 +295,7 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 			headers = append(headers, [2]string{"X-Original-Path", originalPath})
 
 			// Set cors headers (not covered by generic caddy rules)
-			shouldSetCors = true
+			// shouldSetCors = true
 
 			// Continue to look up upstreams as normal
 		}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -260,29 +261,47 @@ func (d *DevxUpstreams) Cleanup() error {
 // This is what's called for every request.
 // It needs to be threadsafe and fast!
 func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
+	// Headers we'll add to the request on success
+	headers := make([][2]string, 0, 10)
+	shouldSetCors := false
+
+	// Databutton app variables set by caddy from url if possible
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
-	customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
 
-	originalPath := ""
-
-	if customBaseUrl != "" && serviceType == "prodx" {
-		customProjectID, err := d.listener.GetProjectIdForCustomDomain(r.Context(), customBaseUrl)
-		if err != nil {
-			d.dumpDebugInfoToSentry(err, r)
-			return nil, err
-		}
-
-		// Use this project id
-		projectID = customProjectID
-
-		// Emulate what we already do for regular prodx deploys
-		databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
-		originalPath = fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path)
-
-		// Continue to look up upstreams as normal
+	// Get origin (without scheme) and check if it has a custom domain
+	originProjectID := ""
+	origin := r.Header.Get("Origin")
+	originUrl, err := url.Parse(origin)
+	if err == nil && originUrl != nil {
+		originProjectID = d.listener.LookupUpProjectIdFromDomain(originUrl.Host)
 	}
 
+	// Streamlit custom domain apps have this header set
+	customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
+	if customBaseUrl != "" && serviceType == "prodx" {
+		// Use domain project, ignore header
+		customDomainProjectID := d.listener.LookupUpProjectIdFromDomain(customBaseUrl)
+		if customDomainProjectID != "" {
+			// Use this id (should perhaps validate for mismatch)
+			projectID = customDomainProjectID
+
+			// Emulate what we already do for regular prodx deploys
+			databuttonAppBasePath := fmt.Sprintf("/_projects/%s/dbtn/prodx", projectID)
+			originalPath := fmt.Sprintf("%s%s", databuttonAppBasePath, r.URL.Path)
+
+			// Set these headers before returning success
+			headers = append(headers, [2]string{"X-Databutton-Project-Id", projectID})
+			headers = append(headers, [2]string{"X-Original-Path", originalPath})
+
+			// Set cors headers (not covered by generic caddy rules)
+			shouldSetCors = true
+
+			// Continue to look up upstreams as normal
+		}
+	}
+
+	// Find upstream appbutler url (this does not have the scheme included)
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
 	// If not found, try a direct firestore lookup?
@@ -293,20 +312,51 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	//   upstream = d.listener.LookUpUrlDirectly(projectID, serviceType)
 	// }
 
+	// For testing what gets passed on by caddy to upstream
+	mockUrl := os.Getenv("MOCK_DEVX_UPSTREAM_URL")
+	if mockUrl != "" {
+		d.logger.Warn("MOCKING!",
+			zap.String("upstream", upstream),
+			zap.String("mockUrl", mockUrl),
+			zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+			zap.String("origin", origin),
+			zap.String("originProjectID", originProjectID),
+		)
+		mockUrl2, err := url.Parse(mockUrl)
+		if err != nil {
+			d.logger.Error("failed to parse mock url", zap.String("mockurl", mockUrl))
+		}
+		upstream = mockUrl2.Host
+	}
+
+	// If no upstream was selected log and return error
 	if upstream == "" {
 		return nil, d.upstreamMissing(r, projectID, serviceType, customBaseUrl)
 	}
 
-	if originalPath != "" {
-		r.Header.Add("X-Original-Path", originalPath)
+	// Set headers and return
+	if shouldSetCors {
+		setCorsHeaders(origin, r.Response.Header)
 	}
-	r.Header.Add("X-Databutton-Project-Id", projectID)
-
+	for _, kv := range headers {
+		r.Header.Set(kv[0], kv[1])
+	}
 	return []*reverseproxy.Upstream{
 		{
 			Dial: upstream,
 		},
 	}, nil
+}
+
+func setCorsHeaders(origin string, header http.Header) {
+	const ALLOWED_METHODS = "POST, GET, PATCH, PUT, OPTIONS, DELETE"
+	const ALLOWED_HEADERS = "Content-Type, X-Request-Id, Authorization, X-Dbtn-Webapp-Version, X-Dbtn-baseurl, X-Authorization"
+	header.Set("Access-Control-Allow-Origin", origin)
+	header.Set("Access-Control-Allow-Methods", ALLOWED_METHODS)
+	header.Set("Access-Control-Allow-Credentials", "true") // TODO: "false"?
+	header.Set("Access-Control-Allow-Headers", ALLOWED_HEADERS)
+	header.Add("Vary", "Origin")
 }
 
 // This should happen rarely, report as much as possible to track why

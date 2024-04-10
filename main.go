@@ -263,7 +263,6 @@ func (d *DevxUpstreams) Cleanup() error {
 func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream, error) {
 	// Headers we'll add to the request on success
 	headers := make([][2]string, 0, 10)
-	shouldSetCors := false
 
 	// Databutton app variables set by caddy from url if possible
 	projectID := r.Header.Get("X-Databutton-Project-Id")
@@ -293,11 +292,6 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 			// Set these headers before returning success
 			headers = append(headers, [2]string{"X-Databutton-Project-Id", projectID})
 			headers = append(headers, [2]string{"X-Original-Path", originalPath})
-
-			// Set cors headers (not covered by generic caddy rules)
-			if r.Header.Get("X-Databutton-Caddy-Matcher") == "msa" {
-				shouldSetCors = true
-			}
 
 			// Continue to look up upstreams as normal
 		}
@@ -338,14 +332,6 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	}
 
 	// Set headers and return
-	if shouldSetCors {
-		if r.Response != nil {
-			d.logger.Error("EXPERIMENTAL setCorsHeaders TRIGGERED", zap.String("origin", origin))
-			d.setCorsHeaders(origin, r.Response.Header)
-		} else {
-			d.logger.Error("EXPERIMENTAL setCorsHeaders NOT TRIGGERED NO RESPONSE", zap.String("origin", origin))
-		}
-	}
 	for _, kv := range headers {
 		r.Header.Set(kv[0], kv[1])
 	}
@@ -356,6 +342,9 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	}, nil
 }
 
+// FIXME: Refactor GetUpstreams into a middleware module that puts data on the context,
+// so GetUpstreams can just fetch from context and return,
+// and set cors headers on response in the middleware module
 func (d *DevxUpstreams) setCorsHeaders(origin string, header http.Header) {
 	defer func() {
 		r := recover()

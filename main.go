@@ -295,7 +295,9 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 			headers = append(headers, [2]string{"X-Original-Path", originalPath})
 
 			// Set cors headers (not covered by generic caddy rules)
-			// shouldSetCors = true
+			if r.Header.Get("X-Databutton-Caddy-Matcher") == "msa" {
+				shouldSetCors = true
+			}
 
 			// Continue to look up upstreams as normal
 		}
@@ -337,7 +339,12 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 
 	// Set headers and return
 	if shouldSetCors {
-		setCorsHeaders(origin, r.Response.Header)
+		if r.Response != nil {
+			d.logger.Error("EXPERIMENTAL setCorsHeaders TRIGGERED", zap.String("origin", origin))
+			d.setCorsHeaders(origin, r.Response.Header)
+		} else {
+			d.logger.Error("EXPERIMENTAL setCorsHeaders NOT TRIGGERED NO RESPONSE", zap.String("origin", origin))
+		}
 	}
 	for _, kv := range headers {
 		r.Header.Set(kv[0], kv[1])
@@ -349,7 +356,15 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	}, nil
 }
 
-func setCorsHeaders(origin string, header http.Header) {
+func (d *DevxUpstreams) setCorsHeaders(origin string, header http.Header) {
+	defer func() {
+		r := recover()
+		if err, ok := r.(error); ok {
+			d.logger.Error("EXPERIMENTAL setCorsHeaders FAILED", zap.String("origin", origin), zap.Error(err))
+		} else {
+			d.logger.Error("EXPERIMENTAL setCorsHeaders FAILED", zap.String("origin", origin), zap.Any("recovered", r))
+		}
+	}()
 	const ALLOWED_METHODS = "POST, GET, PATCH, PUT, OPTIONS, DELETE"
 	const ALLOWED_HEADERS = "Content-Type, X-Request-Id, Authorization, X-Dbtn-Webapp-Version, X-Dbtn-baseurl, X-Authorization"
 	header.Set("Access-Control-Allow-Origin", origin)

@@ -2,7 +2,7 @@
 
 format:  ## Format source code
 	go fmt
-	caddy fmt --overwrite run/Caddyfile
+	# caddy fmt --overwrite run/Caddyfile
 
 lint:  ## Lint source code
 	# TODO: Look into linting options

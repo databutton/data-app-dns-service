@@ -15,6 +15,8 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/databutton/data-app-dns-service/pkg/dontpanic"
 )
 
 const (
@@ -311,7 +313,7 @@ func (l *Listener) RunWithoutCrashing(ctx context.Context, initWg *sync.WaitGrou
 	})
 
 	startTime := time.Now()
-	err := DontPanic(func() error {
+	err := dontpanic.DontPanic(func() error {
 		return l.RunListener(ctx, initWg, collection)
 	})
 	runTime := time.Since(startTime)

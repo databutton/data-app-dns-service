@@ -1,4 +1,4 @@
-package dataappdnsservice
+package dontpanic
 
 import "fmt"
 

@@ -17,6 +17,8 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
+
+	"github.com/databutton/data-app-dns-service/pkg/dontpanic"
 )
 
 // Errors
@@ -227,7 +229,7 @@ func (d *DevxUpstreams) Cleanup() error {
 	var allErrors []error
 	for _, key := range d.usageKeys {
 		// Catch panic from Delete in case we have a bug and decrement too many times
-		err := DontPanic(func() error {
+		err := dontpanic.DontPanic(func() error {
 			deleted, err := usagePool.Delete(key)
 			d.logger.Info("Decremented usage counter",
 				zap.String("key", key),

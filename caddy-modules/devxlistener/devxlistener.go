@@ -1,8 +1,10 @@
+// A firestore listener process to run in the background.
+//
+// https://caddyserver.com/docs/extending-caddy
 package devxlistener
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -11,7 +13,7 @@ import (
 
 type ListenerModule struct {
 	// Configuration fields, if any
-	// MyField string `json:"my_field,omitempty"`
+	MyParam string `json:"myparam,omitempty"`
 	// Number  int    `json:"number,omitempty"`
 
 	// Internal state
@@ -22,11 +24,10 @@ type ListenerModule struct {
 	// data   []string // example of some internal state
 }
 
-// Global variable for access by other modules
-var (
-	instance *ListenerModule
-	once     sync.Once
-)
+// Register module with caddy
+func init() {
+	caddy.RegisterModule(new(ListenerModule))
+}
 
 // Implement caddy.Module interface
 func (m *ListenerModule) CaddyModule() caddy.ModuleInfo {
@@ -37,13 +38,9 @@ func (m *ListenerModule) CaddyModule() caddy.ModuleInfo {
 }
 
 func (m *ListenerModule) Provision(ctx caddy.Context) error {
-	m.logger.Info("LISTENER: Provision")
 	m.logger = ctx.Logger()
+	m.logger.Info("LISTENER: Provision", zap.String("myparam", m.MyParam))
 	m.ctx, m.cancel = context.WithCancel(ctx.Context)
-
-	// Provision your module here
-	instance = m // Set the global instance
-
 	return nil
 }
 
@@ -51,6 +48,11 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 func (m *ListenerModule) Start() error {
 	m.logger.Info("LISTENER: Start")
 	go m.backgroundProcess(m.ctx)
+	for i := range [10]int{} {
+		m.logger.Info("LISTENER: Start", zap.Int("i", i))
+		time.Sleep(time.Second)
+	}
+	m.logger.Info("LISTENER: Start exiting")
 	return nil
 }
 
@@ -61,8 +63,7 @@ func (m *ListenerModule) Stop() error {
 	return nil
 }
 
-// Validate implements caddy.Validator
-// Called after Provision.
+// Validate implements caddy.Validator, called after Provision
 func (m *ListenerModule) Validate() error {
 	m.logger.Info("LISTENER: Validate")
 	return nil
@@ -76,16 +77,20 @@ func (m *ListenerModule) Cleanup() error {
 }
 
 func (m *ListenerModule) backgroundProcess(ctx context.Context) {
-	// Example background process
 	m.logger.Info("LISTENER: Running background process")
-	time.Sleep(3 * time.Second)
-	m.logger.Info("LISTENER: Done running background process")
-	// for {
-	// 	select {
-	// 	// Implement your background logic
-	// 	// Update m.data accordingly
-	// 	}
-	// }
+
+	// TODO: Firestore listener runs here!
+
+	// Example background process
+	ticker := time.NewTicker(time.Second)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.logger.Info("LISTENER: tick")
+		}
+	}
 }
 
 // Interface guards
@@ -97,7 +102,3 @@ var (
 	_ caddy.CleanerUpper = (*ListenerModule)(nil)
 	// _ caddyfile.Unmarshaler       = (*ListenerModule)(nil)
 )
-
-// Notes:
-// https://caddyserver.com/docs/extending-caddy
-// "All modules in the http.handlers namespace implement the caddyhttp.MiddlewareHandler

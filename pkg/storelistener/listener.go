@@ -1,4 +1,4 @@
-package dataappdnsservice
+package storelistener
 
 import (
 	"context"
@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	collectionAppbutlers = "appbutlers"
-	collectionDomains    = "domains"
+	CollectionAppbutlers = "appbutlers"
+	CollectionDomains    = "domains"
 )
 
 // Partial Appbutler document to be parsed from firestore document
@@ -41,17 +41,22 @@ type DomainDoc struct {
 	ProjectId string `firestore:"projectId"`
 }
 
+type Config struct {
+	GcpProject string
+}
+
 type Listener struct {
-	ctx             context.Context
+	Ctx             context.Context
 	cancel          context.CancelFunc
+	cfg             Config
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
 	upstreams       *safemap.SafeStringMap
 	domainProjects  *safemap.SafeStringMap
 }
 
-func NewProjectListener(logger *zap.Logger) (*Listener, error) {
-	client, err := firestore.NewClient(context.Background(), GCP_PROJECT)
+func NewFirestoreListener(cancel context.CancelFunc, logger *zap.Logger, cfg Config) (*Listener, error) {
+	client, err := firestore.NewClient(context.Background(), cfg.GcpProject)
 	if err != nil {
 		return nil, err
 	}
@@ -59,8 +64,9 @@ func NewProjectListener(logger *zap.Logger) (*Listener, error) {
 	// This use of context is a bit hacky, some refactoring can probably make the code cleaner
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &Listener{
-		ctx:             ctx,
+		Ctx:             ctx,
 		cancel:          cancel,
+		cfg:             cfg,
 		firestoreClient: client,
 		logger:          logger,
 		upstreams:       safemap.NewSafeStringMap(),
@@ -110,7 +116,7 @@ func (l *Listener) LookupUpProjectIdFromDomain(customBaseUrl string) string {
 
 // Look up project id for a custom domain
 func (l *Listener) GetProjectIdForCustomDomain(ctx context.Context, customBaseUrl string) (string, error) {
-	pathRef := strings.Join([]string{collectionDomains, customBaseUrl}, "/")
+	pathRef := strings.Join([]string{CollectionDomains, customBaseUrl}, "/")
 
 	doc := l.firestoreClient.Doc(pathRef)
 	if doc == nil {
@@ -161,17 +167,17 @@ func (l *Listener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.Docum
 		return fmt.Errorf("missing cloudRunServiceId")
 	}
 
-	key := makeKey(data.ServiceType, data.ProjectId)
-
-	// Check if overrideURL is provided and non-empty
+	// Determine url to map to
+	var url string
 	if data.OverrideURL != "" {
-		// Use the overrideURL instead of generating one
-		upstreams[key] = data.OverrideURL
+		url = data.OverrideURL
 	} else {
-		// Original URL generation logic
-		url := fmt.Sprintf("%s-%s-%s.a.run.app:443", data.CloudRunServiceId, GCP_PROJECT_HASH, data.RegionCode)
-		upstreams[key] = url
+		url = fmt.Sprintf("%s-%s-%s.a.run.app:443", data.CloudRunServiceId, l.cfg.GcpProject, data.RegionCode)
 	}
+
+	// Store in provided map
+	key := makeKey(data.ServiceType, data.ProjectId)
+	upstreams[key] = url
 
 	return nil
 }
@@ -187,8 +193,8 @@ func (l *Listener) ProcessDomainDoc(ctx context.Context, doc *firestore.Document
 		return nil
 	}
 
-	customBaseUrl := doc.Ref.ID
-	projection[customBaseUrl] = data.ProjectId
+	customDomain := doc.Ref.ID
+	projection[customDomain] = data.ProjectId
 
 	return nil
 }
@@ -198,10 +204,10 @@ func (l *Listener) RunListener(ctx context.Context, initWg *sync.WaitGroup, coll
 	var processDoc func(ctx context.Context, doc *firestore.DocumentSnapshot, upstreams map[string]string) error
 	var stringMap *safemap.SafeStringMap
 	switch collection {
-	case collectionAppbutlers:
+	case CollectionAppbutlers:
 		processDoc = l.ProcessAppbutlerDoc
 		stringMap = l.upstreams
-	case collectionDomains:
+	case CollectionDomains:
 		processDoc = l.ProcessDomainDoc
 		stringMap = l.domainProjects
 	default:
@@ -335,3 +341,8 @@ func (l *Listener) RunWithoutCrashing(ctx context.Context, initWg *sync.WaitGrou
 	log.Info("Listener shutting down")
 	return nil
 }
+
+// Interface guards
+var (
+	_ caddy.Destructor = (*Listener)(nil)
+)

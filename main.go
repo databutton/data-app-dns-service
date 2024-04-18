@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/databutton/data-app-dns-service/pkg/dontpanic"
+	"github.com/databutton/data-app-dns-service/pkg/storelistener"
 )
 
 // Errors
@@ -72,7 +73,7 @@ func initSentry(logger *zap.Logger) error {
 type DevxUpstreams struct {
 	hub       *sentry.Hub
 	logger    *zap.Logger
-	listener  *Listener
+	listener  *storelistener.Listener
 	usageKeys []string
 }
 
@@ -151,17 +152,24 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		// Should we create a logger not associated with the caddy module instance? Seems to work fine.
 		logger := d.logger.With(zap.String("context", "projectsListener"))
 
-		listener, err := NewProjectListener(logger)
+		// This use of context is a bit hacky, some refactoring can probably make the code cleaner.
+		// The listener will call cancel when Caddy Destructs it.
+		// That will cancel the listenerCtx which the runListener goroutines are running with.
+		listenerCtx, listenerCancel := context.WithCancel(context.Background())
+		listener, err := storelistener.NewFirestoreListener(
+			listenerCancel,
+			logger,
+			storelistener.Config{GcpProject: GCP_PROJECT},
+		)
 		if err != nil {
 			return listener, err
 		}
 
-		runListener := func(ctx context.Context, collection string, initWg *sync.WaitGroup) {
-			ctx, cancel := context.WithCancel(ctx)
-			defer cancel()
+		runListener := func(collection string, initWg *sync.WaitGroup) {
+			defer listenerCancel()
 
 			hub := d.hub.Clone()
-			ctx = sentry.SetHubOnContext(ctx, hub)
+			ctx := sentry.SetHubOnContext(listenerCtx, hub)
 
 			// This should run forever or until canceled...
 			err := listener.RunListener(ctx, initWg, collection)
@@ -180,11 +188,11 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 
 		appbutlersInitWg := new(sync.WaitGroup)
 		appbutlersInitWg.Add(1)
-		go runListener(listener.ctx, collectionAppbutlers, appbutlersInitWg)
+		go runListener(storelistener.CollectionAppbutlers, appbutlersInitWg)
 
 		domainsInitWg := new(sync.WaitGroup)
 		domainsInitWg.Add(1)
-		go runListener(listener.ctx, collectionDomains, domainsInitWg)
+		go runListener(storelistener.CollectionDomains, domainsInitWg)
 
 		domainsInitWg.Wait()
 		appbutlersInitWg.Wait()
@@ -200,7 +208,7 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 		d.hub.CaptureException(err)
 		return err
 	}
-	d.listener = listener.(*Listener)
+	d.listener = listener.(*storelistener.Listener)
 	d.usageKeys = append(d.usageKeys, projectsListenerUsagePoolKey)
 
 	d.logger.Info("Provision done",

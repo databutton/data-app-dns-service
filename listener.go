@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/databutton/data-app-dns-service/pkg/dontpanic"
+	"github.com/databutton/data-app-dns-service/pkg/safemap"
 )
 
 const (
@@ -45,8 +46,8 @@ type Listener struct {
 	cancel          context.CancelFunc
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
-	upstreams       *SafeStringMap
-	domainProjects  *SafeStringMap
+	upstreams       *safemap.SafeStringMap
+	domainProjects  *safemap.SafeStringMap
 }
 
 func NewProjectListener(logger *zap.Logger) (*Listener, error) {
@@ -62,8 +63,8 @@ func NewProjectListener(logger *zap.Logger) (*Listener, error) {
 		cancel:          cancel,
 		firestoreClient: client,
 		logger:          logger,
-		upstreams:       NewSafeStringMap(),
-		domainProjects:  NewSafeStringMap(),
+		upstreams:       safemap.NewSafeStringMap(),
+		domainProjects:  safemap.NewSafeStringMap(),
 	}
 
 	return l, nil
@@ -195,7 +196,7 @@ func (l *Listener) ProcessDomainDoc(ctx context.Context, doc *firestore.Document
 func (l *Listener) RunListener(ctx context.Context, initWg *sync.WaitGroup, collection string) error {
 	// Maybe there's an abstraction waiting to be created here
 	var processDoc func(ctx context.Context, doc *firestore.DocumentSnapshot, upstreams map[string]string) error
-	var stringMap *SafeStringMap
+	var stringMap *safemap.SafeStringMap
 	switch collection {
 	case collectionAppbutlers:
 		processDoc = l.ProcessAppbutlerDoc

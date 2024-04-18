@@ -1,4 +1,4 @@
-package dataappdnsservice
+package safemap
 
 import "sync"
 

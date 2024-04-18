@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -71,10 +73,11 @@ func initSentry(logger *zap.Logger) error {
 }
 
 type DevxUpstreams struct {
-	hub       *sentry.Hub
-	logger    *zap.Logger
-	listener  *storelistener.Listener
-	usageKeys []string
+	hub              *sentry.Hub
+	logger           *zap.Logger
+	listener         *storelistener.Listener
+	usageKeys        []string
+	mockUpstreamHost string
 }
 
 func init() {
@@ -211,6 +214,19 @@ func (d *DevxUpstreams) Provision(ctx caddy.Context) error {
 	d.listener = listener.(*storelistener.Listener)
 	d.usageKeys = append(d.usageKeys, projectsListenerUsagePoolKey)
 
+	mockUrl := os.Getenv("MOCK_DEVX_UPSTREAM_URL")
+	if mockUrl != "" {
+		u, err := url.Parse(mockUrl)
+		if err != nil {
+			d.logger.Error("failed to parse mock url", zap.String("mockurl", mockUrl))
+			return err
+		}
+		d.mockUpstreamHost = u.Host
+		d.logger.Warn("MOCKING ALL UPSTREAM HOSTS!",
+			zap.String("mockUpstreamHost", d.mockUpstreamHost),
+		)
+	}
+
 	d.logger.Info("Provision done",
 		zap.Duration("loadTime", time.Since(startTime)),
 		zap.Int("upstreamsCount", d.listener.CountUpstreams()),
@@ -279,12 +295,13 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 
 	// Get origin (without scheme) and check if it has a custom domain
-	originProjectID := ""
-	origin := r.Header.Get("Origin")
-	originUrl, err := url.Parse(origin)
-	if err == nil && originUrl != nil {
-		originProjectID = d.listener.LookupUpProjectIdFromDomain(originUrl.Host)
-	}
+	// TODO: This is intended for CORS middleware
+	// originProjectID := ""
+	// origin := r.Header.Get("Origin")
+	// originUrl, err := url.Parse(origin)
+	// if err == nil && originUrl != nil {
+	// 	originProjectID = d.listener.LookupUpProjectIdFromDomain(originUrl.Host)
+	// }
 
 	// Streamlit custom domain apps have this header set
 	customBaseUrl := r.Header.Get("X-Dbtn-Baseurl")
@@ -310,35 +327,24 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 	// Find upstream appbutler url (this does not have the scheme included)
 	upstream := d.listener.LookupUpUrl(projectID, serviceType)
 
-	// If not found, try a direct firestore lookup?
-	// (not doing this now, it could be a sign of hibernated
-	// or deleted apps still getting traffic,
-	// and we don't want those cases spamming firestore)
-	// if upstream == "" {
-	//   upstream = d.listener.LookUpUrlDirectly(projectID, serviceType)
-	// }
-
 	// For testing what gets passed on by caddy to upstream
-	mockUrl := os.Getenv("MOCK_DEVX_UPSTREAM_URL")
-	if mockUrl != "" {
-		d.logger.Warn("MOCKING!",
-			zap.String("upstream", upstream),
-			zap.String("mockUrl", mockUrl),
-			zap.String("projectID", projectID),
-			zap.String("serviceType", serviceType),
-			zap.String("origin", origin),
-			zap.String("originProjectID", originProjectID),
-		)
-		mockUrl2, err := url.Parse(mockUrl)
-		if err != nil {
-			d.logger.Error("failed to parse mock url", zap.String("mockurl", mockUrl))
-		}
-		upstream = mockUrl2.Host
+	if d.mockUpstreamHost != "" {
+		d.logger.Warn("Mocking upstream", zap.String("listenerUpstream", upstream), zap.String("mockUpstream", d.mockUpstreamHost))
+		upstream = d.mockUpstreamHost
 	}
 
 	// If no upstream was selected log and return error
 	if upstream == "" {
-		return nil, d.upstreamMissing(r, projectID, serviceType, customBaseUrl)
+		err := upstreamMissingError(projectID, serviceType, customBaseUrl)
+		d.logger.Warn(
+			"Failed to get upstream",
+			zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+			zap.String("customBaseUrl", customBaseUrl),
+			zap.Error(err),
+		)
+		return nil, err
+
 	}
 
 	// Set headers and return
@@ -355,13 +361,13 @@ func (d *DevxUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstream,
 // FIXME: Refactor GetUpstreams into a middleware module that puts data on the context,
 // so GetUpstreams can just fetch from context and return,
 // and set cors headers on response in the middleware module
-func (d *DevxUpstreams) setCorsHeaders(origin string, header http.Header) {
+func setCorsHeaders(logger *zap.Logger, origin string, header http.Header) {
 	defer func() {
 		r := recover()
 		if err, ok := r.(error); ok {
-			d.logger.Error("EXPERIMENTAL setCorsHeaders FAILED", zap.String("origin", origin), zap.Error(err))
+			logger.Error("EXPERIMENTAL setCorsHeaders FAILED", zap.String("origin", origin), zap.Error(err))
 		} else {
-			d.logger.Error("EXPERIMENTAL setCorsHeaders FAILED", zap.String("origin", origin), zap.Any("recovered", r))
+			logger.Error("EXPERIMENTAL setCorsHeaders FAILED", zap.String("origin", origin), zap.Any("recovered", r))
 		}
 	}()
 	const ALLOWED_METHODS = "POST, GET, PATCH, PUT, OPTIONS, DELETE"
@@ -374,52 +380,43 @@ func (d *DevxUpstreams) setCorsHeaders(origin string, header http.Header) {
 }
 
 // This should happen rarely, report as much as possible to track why
-func (d *DevxUpstreams) upstreamMissing(r *http.Request, projectID, serviceType, customBaseUrl string) error {
-	var err error
+func upstreamMissingError(projectID, serviceType, customBaseUrl string) error {
 	switch {
 	case projectID == "":
-		err = ErrProjectHeaderMissing
+		return ErrProjectHeaderMissing
 	case serviceType == "":
-		err = ErrServiceHeaderMissing
+		return ErrServiceHeaderMissing
 	default:
-		err = ErrUpstreamNotFound
+		return ErrUpstreamNotFound
 	}
-
-	// // Clone hub for thread safety, this is in the scope of a single request
-	// hub := d.hub.Clone()
-	//
-	// // Add some request context for the error
-	// hub.ConfigureScope(func(scope *sentry.Scope) {
-	// 	scope.SetLevel(sentry.LevelError)
-	//
-	// 	// This seems to set the url to something missing the project part in the middle
-	// 	scope.SetRequest(r)
-	//
-	// 	// TODO: This doesn't seem to be available
-	// 	scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
-	//
-	// 	scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
-	// 	scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
-	//
-	// 	scope.SetTag("projectId", projectID)
-	// 	scope.SetTag("serviceType", serviceType)
-	// })
-	// hub.CaptureException(err)
-
-	d.logger.Warn(
-		"Failed to get upstream",
-		zap.String("projectID", projectID),
-		zap.String("serviceType", serviceType),
-		zap.String("customBaseUrl", customBaseUrl),
-		zap.Error(err),
-	)
-
-	return err
 }
 
-func (d *DevxUpstreams) dumpDebugInfoToSentry(err error, r *http.Request) {
+func dumpUpstreamMissingErrorToSentry(hub *sentry.Hub, r *http.Request, err error, projectID, serviceType, customBaseUrl string) {
 	// Clone hub for thread safety, this is in the scope of a single request
-	hub := d.hub.Clone()
+	hub = hub.Clone()
+
+	// Add some request context for the error
+	hub.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelError)
+
+		// This seems to set the url to something missing the project part in the middle
+		scope.SetRequest(r)
+
+		// TODO: This doesn't seem to be available
+		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
+
+		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
+		scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
+
+		scope.SetTag("projectId", projectID)
+		scope.SetTag("serviceType", serviceType)
+	})
+	hub.CaptureException(err)
+}
+
+func dumpDebugInfoToSentry(hub *sentry.Hub, r *http.Request, err error) {
+	// Clone hub for thread safety, this is in the scope of a single request
+	hub = hub.Clone()
 
 	// Doesn't matter if this is a bit slow
 	defer hub.Flush(2 * time.Second)

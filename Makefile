@@ -1,12 +1,12 @@
 .PHONY: format lint test build run
 
 format:  ## Format source code
-	go fmt
+	go fmt ./...
 	# caddy fmt --overwrite run/Caddyfile
 
 lint:  ## Lint source code
 	# TODO: Look into linting options
-	go vet
+	go vet ./...
 
 test:  ## Run tests
 	go test ./...

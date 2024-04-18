@@ -1,4 +1,4 @@
-package dataappdnsservice
+package devxupstreamer
 
 const (
 	GCP_PROJECT = "databutton"

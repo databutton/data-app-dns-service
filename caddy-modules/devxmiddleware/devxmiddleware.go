@@ -6,7 +6,6 @@ package devxmiddleware
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +26,7 @@ type DevxMiddlewareModule struct {
 	InstanceTag string `json:"instance_tag,omitempty"`
 
 	// Internal state
+	debug            bool
 	logger           *zap.Logger
 	listener         *storelistener.Listener // TODO: Nicer to store as narrower interface
 	mockUpstreamHost string
@@ -48,7 +48,6 @@ func (m *DevxMiddlewareModule) CaddyModule() caddy.ModuleInfo {
 
 func (m *DevxMiddlewareModule) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger().With(zap.String("instanceTag", m.InstanceTag))
-	m.logger.Info("MIDDLEWARE: Provision")
 
 	// Get initialized listener from devxlistener app module
 	l, err := devxlistener.Get(ctx)
@@ -121,11 +120,11 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 var DevxKey caddy.CtxKey = "devx.data"
 
 type DevxRequestData struct {
-	ProjectID     string
-	ServiceType   string
-	UpstreamHost  string
-	CustomBaseUrl string
-	Hub           *sentry.Hub
+	ProjectID    string
+	ServiceType  string
+	UpstreamHost string
+	CustomDomain string
+	Hub          *sentry.Hub
 }
 
 func makeOriginalPath(projectID, serviceType, path string) string {
@@ -142,22 +141,42 @@ func makeOriginalPath(projectID, serviceType, path string) string {
 func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request, h caddyhttp.Handler) error {
 	ctx := r.Context()
 
-	// Origin should be e.g. https://username.databutton.app
+	// TODO: Maybe add zap and sentry middleware to entire caddy stack and not just devx parts
+	// Clone a sentry hub for this request
+	var hub *sentry.Hub
+	if m.debug {
+		hub = sentry.CurrentHub().Clone()
+		hub.ConfigureScope(func(scope *sentry.Scope) {
+			scope.SetRequest(r)
+		})
+	}
+
+	// Origin should be e.g.
+	// https://databutton.com
+	// https://username.databutton.app
+	// https://customdomain.com
+	// but it is not always present!
 	originHeader := r.Header.Get("Origin")
 
-	// Validate origin
-	originUrl, err := url.Parse(originHeader)
-	if err != nil || originUrl == nil {
-		m.logger.Error(fmt.Sprintf("Invalid origin header '%s'", originHeader))
-		w.WriteHeader(http.StatusBadRequest)
-		io.Copy(io.Discard, r.Body)
-		return nil
+	// Validate origin _if present_
+	var originHost string
+	if originHeader != "" {
+		originUrl, err := url.Parse(originHeader)
+		if err != nil {
+			m.logger.Error(fmt.Sprintf("Invalid origin header '%s'", originHeader))
+			w.WriteHeader(http.StatusBadRequest)
+			return nil
+		}
+		originHost = originUrl.Host
 	}
-	originHost := originUrl.Host
+
+	// This will be set to originHeader in cases where cross-domain request is valid from origin
+	var corsOrigin string
 
 	// Databutton app variables set by caddy from url if possible
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
+	var customDomain string
 
 	// Origin shows where app is served from:
 	// - devx streamlit       databutton.com/_projects/PID/dbtn/devx/*
@@ -179,86 +198,108 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// - prodx beyond         user.databutton.com|app
 	// - custom beyond        custom.com
 
-	// This will be set to origin in cases where request is valid from origin
-	var corsOrigin string
-
-	// Deprecated: Streamlit custom domain apps have this header set in cloudfront
-	streamlitCustomDomain := r.Header.Get("X-Dbtn-Baseurl")
-	if streamlitCustomDomain != "" && serviceType == "prodx" {
-		r.Header.Set("X-Dbtn-Proxy-Case", "streamlit-customdomain")
-
-		if streamlitCustomDomain != originHost {
-			m.logger.Warn("Origin and X-Dbtn-BaseUrl differs",
-				zap.String("OriginHost", originHost),
-				zap.String("DbtnBaseUrl", streamlitCustomDomain),
-			)
-		}
-
-		// Get project id from domain lookup
-		projectID = m.listener.LookupUpProjectIdFromDomain(streamlitCustomDomain)
-
-		// Accept if project found for this domain and header and origin matches
-		if projectID != "" {
-			corsOrigin = originHeader
-			r.Header.Set("X-Databutton-Project-Id", projectID)
-		} else {
-			m.logger.Error("Blank projectID after custom domain lookup", zap.String("originHost", originHost))
-		}
-
-		// Emulate what we already do for regular prodx deploys
-		r.Header.Set(
-			"X-Original-Path",
-			// NB! This is for streamlit custom domains,
-			// where r.URL.Path will not include the
-			// /_projects/.../prodx part
-			makeOriginalPath(projectID, serviceType, r.URL.Path),
-		)
-
-	} else if originHeader == "https://databutton.com" {
-		r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
-		// Accept when served from databutton, devx and legacy prodx cases
-		corsOrigin = originHeader
-	} else if strings.HasSuffix(originHost, ".databutton.app") || strings.HasSuffix(originHost, ".databutton.com") {
-		r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
-		// FIXME: Move to .app, drop .com case
-		username := strings.TrimSuffix(strings.TrimSuffix(originHost, ".databutton.app"), ".databutton.com")
-		// FIXME: Only set if username is owner of projectID
-		if username != "" {
-			corsOrigin = originHeader
-		}
-	} else {
-		r.Header.Set("X-Dbtn-Proxy-Case", "beyond-customdomain")
-		// Must be custom domain
-
-		// Get project id from domain lookup
-		projectID = m.listener.LookupUpProjectIdFromDomain(originHost)
-
-		// Accept if project found for this domain and header and origin matches
-		if projectID != "" {
-			corsOrigin = originHeader
-			r.Header.Set("X-Databutton-Project-Id", projectID)
-		} else {
-			m.logger.Error("Blank projectID after custom domain lookup", zap.String("originHost", originHost))
-		}
-
-		// Emulate what we already do for regular prodx deploys
-		// (This is different from the streamlit case)
-		r.Header.Set("X-Original-Path", makeOriginalPath(projectID, serviceType, r.URL.Path))
-	}
-
 	if projectID == "" {
-		m.logger.Error("Missing projectID after app lookups")
+		// This means the URL is not _projects/... and is currently only happening for
+		// streamlit apps on custom domains because then all of prodx is behind the domain.
+
+		// Deprecated: Streamlit custom domain apps have this header set in cloudfront
+		streamlitCustomDomain := r.Header.Get("X-Dbtn-Baseurl")
+		if streamlitCustomDomain != "" && serviceType == "prodx" {
+			r.Header.Set("X-Dbtn-Proxy-Case", "streamlit-customdomain")
+
+			// This will happen
+			// if streamlitCustomDomain != originHost {
+			// 	m.logger.Warn("Origin and X-Dbtn-BaseUrl differs",
+			// 		zap.String("OriginHost", originHost),
+			// 		zap.String("DbtnBaseUrl", streamlitCustomDomain),
+			// 	)
+			// }
+
+			// Get project id from domain lookup
+			projectID = m.listener.LookupUpProjectIdFromDomain(streamlitCustomDomain)
+
+			// Accept if project found for this domain and header and origin matches
+			if projectID != "" {
+				corsOrigin = originHeader
+				customDomain = streamlitCustomDomain
+				r.Header.Set("X-Databutton-Project-Id", projectID)
+
+				// Emulate what we already do for regular prodx deploys in caddy
+				// NB! This is for streamlit custom domains, where r.URL.Path
+				// will not include the /_projects/.../prodx part
+				r.Header.Set(
+					"X-Original-Path",
+					makeOriginalPath(projectID, serviceType, r.URL.Path),
+				)
+			}
+		}
+
+		if projectID == "" {
+			// No project specified, can't find domain, just return 404 here right away
+			m.logger.Error(
+				"No projectId and domain lookup failed",
+				zap.String("originHost", originHost),
+				zap.String("streamlitCustomDomain", streamlitCustomDomain),
+				zap.String("customDomain", customDomain),
+			)
+			w.WriteHeader(http.StatusBadRequest)
+			return nil
+		}
+
+	} else {
+		if originHeader == "" {
+			// Same-domain requests, requests from backends, etc, never set cors
+			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
+		} else if originHeader == "https://databutton.com" {
+			// App served from databutton.com, devx and legacy prodx cases
+			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
+			corsOrigin = originHeader
+		} else if strings.HasSuffix(originHost, ".databutton.app") || strings.HasSuffix(originHost, ".databutton.com") {
+			// New style hosting at per-user subdomains
+			r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
+			username := strings.TrimSuffix(originHost, ".databutton.app")
+
+			// FIXME: Move to .app, drop .com case
+			username = strings.TrimSuffix(username, ".databutton.com")
+
+			// FIXME: Only set cors if username is owner of projectID,
+			// need some adjusted data model to listen to
+			if username != "" {
+				corsOrigin = originHeader
+			}
+		} else {
+			// Call comes from outside our infra
+			r.Header.Set("X-Dbtn-Proxy-Case", "beyond-customdomain")
+
+			// Get project id from domain lookup
+			originProjectID := m.listener.LookupUpProjectIdFromDomain(originHost)
+
+			// Accept if project found for this domain and header and origin matches
+			if originProjectID == projectID {
+				corsOrigin = originHeader
+				customDomain = originHost
+			} else {
+				// Attempt at accessing another project, just return 401 right away
+				m.logger.Error(
+					"Attempt at accessing another project",
+					zap.String("originHost", originHost),
+					zap.String("originProjectID", originProjectID),
+					zap.String("projectID", projectID),
+				)
+				w.WriteHeader(http.StatusUnauthorized)
+				return nil
+			}
+		}
 	}
 
 	// Set cors headers allowing this origin
-	if projectID != "" && corsOrigin != "" {
+	if corsOrigin != "" {
 		setCorsHeaders(m.logger, w, corsOrigin)
 	}
 
 	// Short-circuit options requests
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(http.StatusNoContent)
-		io.Copy(io.Discard, r.Body)
 		return nil
 	}
 
@@ -278,23 +319,19 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		upstream = m.mockUpstreamHost
 	}
 
-	// Clone a sentry hub for this request
-	hub := sentry.CurrentHub().Clone()
-	hub.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetTag("ProjectID", projectID)
-		scope.SetTag("ServiceType", serviceType)
-		scope.SetTag("Origin", originHeader)
-		scope.SetTag("UpstreamHost", upstream)
-		scope.SetTag("StreamlitCustomDomain", streamlitCustomDomain)
-	})
+	if hub != nil {
+		hub.ConfigureScope(func(scope *sentry.Scope) {
+			scope.SetTag("UpstreamHost", upstream)
+		})
+	}
 
 	// Put properties on context for use in reverse proxy upstreams handler
 	ctx = context.WithValue(ctx, DevxKey, DevxRequestData{
-		ProjectID:     projectID,
-		ServiceType:   serviceType,
-		UpstreamHost:  upstream,
-		CustomBaseUrl: streamlitCustomDomain,
-		Hub:           hub,
+		ProjectID:    projectID,
+		ServiceType:  serviceType,
+		UpstreamHost: upstream,
+		CustomDomain: customDomain,
+		Hub:          hub,
 	})
 
 	// Keep going to reverse proxy which will call our
@@ -304,7 +341,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 const (
 	ALLOWED_METHODS = "POST, GET, PATCH, PUT, OPTIONS, DELETE"
-	ALLOWED_HEADERS = "Content-Type, X-Request-Id, Authorization, X-Dbtn-Webapp-Version, X-Dbtn-Baseurl, X-Authorization, X-FIXME-TESTING" // TODO: Remove X-FIXME-TESTING when observed
+	ALLOWED_HEADERS = "Content-Type, X-Request-Id, Authorization, X-Dbtn-Webapp-Version, X-Dbtn-Baseurl, X-Authorization"
 )
 
 func setCorsHeaders(logger *zap.Logger, w http.ResponseWriter, origin string) {

@@ -65,11 +65,10 @@ func (d *DevxUpstreamsModule) GetUpstreams(r *http.Request) ([]*reverseproxy.Ups
 			"Failed to get upstream",
 			zap.String("projectID", data.ProjectID),
 			zap.String("serviceType", data.ServiceType),
-			zap.String("customBaseUrl", data.CustomBaseUrl),
+			zap.String("customDomain", data.CustomDomain),
 			zap.Error(err),
 		)
 		return nil, err
-
 	}
 
 	return []*reverseproxy.Upstream{
@@ -83,17 +82,21 @@ func (d *DevxUpstreamsModule) GetUpstreams(r *http.Request) ([]*reverseproxy.Ups
 func upstreamMissingError(data devxmiddleware.DevxRequestData) error {
 	switch {
 	case data.ProjectID == "":
+		// TODO: Maybe return badrequest for this in middleware
 		return ErrProjectHeaderMissing
 	case data.ServiceType == "":
+		// TODO: Maybe return badrequest for this in middleware
 		return ErrServiceHeaderMissing
-	case data.CustomBaseUrl != "":
+	case data.CustomDomain != "":
+		// TODO: Maybe return not found for this in middleware
 		return ErrCustomDomainNotFound
 	default:
+		// TODO: Maybe return internal server error for this in middleware
 		return ErrUpstreamNotFound
 	}
 }
 
-func dumpUpstreamMissingErrorToSentry(hub *sentry.Hub, r *http.Request, err error, projectID, serviceType, customBaseUrl string) {
+func dumpUpstreamMissingErrorToSentry(hub *sentry.Hub, r *http.Request, err error, projectID, serviceType, customDomain string) {
 	// Add some request context for the error
 	hub.ConfigureScope(func(scope *sentry.Scope) {
 		scope.SetLevel(sentry.LevelError)

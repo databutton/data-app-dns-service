@@ -21,6 +21,11 @@ import (
 )
 
 const (
+	GCP_PROJECT      = "databutton"
+	GCP_PROJECT_HASH = "gvjcjtpafa"
+)
+
+const (
 	CollectionAppbutlers = "appbutlers"
 	CollectionDomains    = "domains"
 )
@@ -38,25 +43,22 @@ type AppbutlerDoc struct {
 
 // Partial Domain document to be parsed from firestore document
 type DomainDoc struct {
-	ProjectId string `firestore:"projectId"`
-}
-
-type Config struct {
-	GcpProject string
+	Active     bool   `firestore:"active"`
+	Validation string `firestore:"validation"`
+	ProjectId  string `firestore:"projectId"`
 }
 
 type Listener struct {
 	Ctx             context.Context
 	cancel          context.CancelFunc
-	cfg             Config
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
 	upstreams       *safemap.SafeStringMap
 	domainProjects  *safemap.SafeStringMap
 }
 
-func NewFirestoreListener(cancel context.CancelFunc, logger *zap.Logger, cfg Config) (*Listener, error) {
-	client, err := firestore.NewClient(context.Background(), cfg.GcpProject)
+func NewFirestoreListener(cancel context.CancelFunc, logger *zap.Logger) (*Listener, error) {
+	client, err := firestore.NewClient(context.Background(), GCP_PROJECT)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +68,6 @@ func NewFirestoreListener(cancel context.CancelFunc, logger *zap.Logger, cfg Con
 	l := &Listener{
 		Ctx:             ctx,
 		cancel:          cancel,
-		cfg:             cfg,
 		firestoreClient: client,
 		logger:          logger,
 		upstreams:       safemap.NewSafeStringMap(),
@@ -147,6 +148,15 @@ func (l *Listener) ShouldSkipAppbutler(data AppbutlerDoc) bool {
 	return false
 }
 
+func makeCloudRunUrl(data AppbutlerDoc) string {
+	return fmt.Sprintf(
+		"%s-%s-%s.a.run.app:443",
+		data.CloudRunServiceId,
+		GCP_PROJECT_HASH,
+		data.RegionCode,
+	)
+}
+
 func (l *Listener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.DocumentSnapshot, upstreams map[string]string) error {
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
@@ -172,7 +182,7 @@ func (l *Listener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.Docum
 	if data.OverrideURL != "" {
 		url = data.OverrideURL
 	} else {
-		url = fmt.Sprintf("%s-%s-%s.a.run.app:443", data.CloudRunServiceId, l.cfg.GcpProject, data.RegionCode)
+		url = makeCloudRunUrl(data)
 	}
 
 	// Store in provided map
@@ -188,6 +198,14 @@ func (l *Listener) ProcessDomainDoc(ctx context.Context, doc *firestore.Document
 		return err
 	}
 
+	// TODO: Active is not consistently set in the /domains collection, make sure
+	// it is for new domains and then we can use it here when streamlit is dead:
+	// if !data.Active {
+	// 	return nil
+	// }
+	// if data.Validation != "validated" {
+	// 	return nil
+	// }
 	if data.ProjectId == "" {
 		// Treating missing projectId as "do not route"
 		return nil
@@ -195,6 +213,8 @@ func (l *Listener) ProcessDomainDoc(ctx context.Context, doc *firestore.Document
 
 	customDomain := doc.Ref.ID
 	projection[customDomain] = data.ProjectId
+
+	// l.logger.Warn(fmt.Sprintf("ADDED %s  %s", customDomain, data.ProjectId))
 
 	return nil
 }

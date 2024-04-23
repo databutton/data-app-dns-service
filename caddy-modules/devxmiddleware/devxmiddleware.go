@@ -247,6 +247,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		}
 
 	} else {
+		isDevx := serviceType == "devx"
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
@@ -254,11 +255,11 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			// App served from databutton.com, devx and legacy prodx cases
 			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
 			corsOrigin = originHeader
-		} else if strings.HasSuffix(originHeader, "-databutton.vercel.app") {
+		} else if isDevx && strings.HasSuffix(originHeader, "-databutton.vercel.app") {
 			// PR links
 			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-pr-vercel-app")
 			corsOrigin = originHeader
-		} else if strings.HasPrefix(originHost, "next-dbtn-") && strings.HasSuffix(originHeader, ".web.app") {
+		} else if isDevx && strings.HasPrefix(originHost, "next-dbtn-") && strings.HasSuffix(originHeader, ".web.app") {
 			// PR links
 			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-pr-web-app")
 			corsOrigin = originHeader
@@ -275,7 +276,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			if username != "" {
 				corsOrigin = originHeader
 			}
-		} else if strings.HasPrefix(originHost, "localhost") {
+		} else if isDevx && strings.HasPrefix(originHost, "localhost") {
 			// Call comes from localhost, i.e. running webapp locally
 			r.Header.Set("X-Dbtn-Proxy-Case", "localhost-for-dev")
 			// TODO: This is not supposed to be necessary, if only vite proxies

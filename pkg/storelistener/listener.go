@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -16,36 +15,18 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/databutton/data-app-dns-service/pkg/dontpanic"
 	"github.com/databutton/data-app-dns-service/pkg/safemap"
 )
 
-const (
-	GCP_PROJECT      = "databutton"
-	GCP_PROJECT_HASH = "gvjcjtpafa"
-)
-
-const (
-	CollectionAppbutlers = "appbutlers"
-	CollectionDomains    = "domains"
-)
-
-// Partial Appbutler document to be parsed from firestore document
-type AppbutlerDoc struct {
-	UpdateTime        time.Time
-	ProjectId         string `firestore:"projectId,omitempty"`
-	ServiceType       string `firestore:"serviceType,omitempty"`
-	RegionCode        string `firestore:"regionCode,omitempty"`
-	CloudRunServiceId string `firestore:"cloudRunServiceId,omitempty"`
-	ServiceIsReady    bool   `firestore:"serviceIsReady,omitempty"`
-	OverrideURL       string `firestore:"overrideURL,omitempty"`
+// Make key for upstreams map lookup, just to have it defined one place
+func makeKey(serviceType, projectId string) string {
+	return serviceType + projectId
 }
 
-// Partial Domain document to be parsed from firestore document
-type DomainDoc struct {
-	Active     bool   `firestore:"active"`
-	Validation string `firestore:"validation"`
-	ProjectId  string `firestore:"projectId"`
+type Projection interface {
+	Collection() string
+	Update(context.Context, *firestore.DocumentSnapshot) error
+	Swap(*Listener)
 }
 
 type Listener struct {
@@ -54,6 +35,7 @@ type Listener struct {
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
 	upstreams       *safemap.SafeStringMap
+	usernames       *safemap.SafeStringMap
 	domainProjects  *safemap.SafeStringMap
 }
 
@@ -71,6 +53,7 @@ func NewFirestoreListener(cancel context.CancelFunc, logger *zap.Logger) (*Liste
 		firestoreClient: client,
 		logger:          logger,
 		upstreams:       safemap.NewSafeStringMap(),
+		usernames:       safemap.NewSafeStringMap(),
 		domainProjects:  safemap.NewSafeStringMap(),
 	}
 
@@ -93,17 +76,21 @@ func (l *Listener) Destruct() error {
 
 var _ caddy.Destructor = (*Listener)(nil)
 
-// Make key for upstreams map lookup, just to have it defined one place
-func makeKey(serviceType, projectId string) string {
-	return serviceType + projectId
-}
-
-// LookupUpUrl does an optimized cache lookup to get the upstream url.
+// LookupUpstreamHost does an optimized cache lookup to get the upstream url.
 // The rest of this Listener code is basically written to support this fast lookup.
-func (l *Listener) LookupUpUrl(projectID, serviceType string) string {
+func (l *Listener) LookupUpstreamHost(projectID, serviceType string) string {
 	upstreams := l.upstreams.GetMap()
 	key := makeKey(serviceType, projectID)
 	url := upstreams[key]
+	return url
+}
+
+// LookupUsername does an optimized cache lookup to get the username for a project.
+// The rest of this Listener code is basically written to support this fast lookup.
+func (l *Listener) LookupUsername(projectID, serviceType string) string {
+	usernames := l.usernames.GetMap()
+	key := makeKey(serviceType, projectID)
+	url := usernames[key]
 	return url
 }
 
@@ -115,124 +102,8 @@ func (l *Listener) LookupUpProjectIdFromDomain(customBaseUrl string) string {
 	return projectId
 }
 
-// Look up project id for a custom domain
-func (l *Listener) GetProjectIdForCustomDomain(ctx context.Context, customBaseUrl string) (string, error) {
-	pathRef := strings.Join([]string{CollectionDomains, customBaseUrl}, "/")
-
-	doc := l.firestoreClient.Doc(pathRef)
-	if doc == nil {
-		return "", fmt.Errorf("invalid doc reference %s", pathRef)
-	}
-	ref, err := doc.Get(ctx)
-	if err != nil {
-		return "", err
-	}
-
-	var domain DomainDoc
-	err = ref.DataTo(&domain)
-	if err != nil {
-		return "", err
-	}
-
-	return domain.ProjectId, nil
-}
-
-func (l *Listener) ShouldSkipAppbutler(data AppbutlerDoc) bool {
-	if data.ProjectId == "" {
-		// Skip free pool appbutlers without assigned projects, there's nothing to route
-		return true
-	} else if !data.ServiceIsReady {
-		// Skip before service is ready to receive requests
-		return true
-	}
-	return false
-}
-
-func makeCloudRunUrl(data AppbutlerDoc) string {
-	return fmt.Sprintf(
-		"%s-%s-%s.a.run.app:443",
-		data.CloudRunServiceId,
-		GCP_PROJECT_HASH,
-		data.RegionCode,
-	)
-}
-
-func (l *Listener) ProcessAppbutlerDoc(ctx context.Context, doc *firestore.DocumentSnapshot, upstreams map[string]string) error {
-	var data AppbutlerDoc
-	if err := doc.DataTo(&data); err != nil {
-		return err
-	}
-
-	if l.ShouldSkipAppbutler(data) {
-		return nil
-	}
-
-	if data.ProjectId == "" {
-		return fmt.Errorf("missing projectId")
-	} else if data.ServiceType == "" {
-		return fmt.Errorf("missing serviceType")
-	} else if data.RegionCode == "" {
-		return fmt.Errorf("missing regionCode")
-	} else if data.CloudRunServiceId == "" && data.OverrideURL == "" { // Updated this line to check for OverrideURL as well
-		return fmt.Errorf("missing cloudRunServiceId")
-	}
-
-	// Determine url to map to
-	var url string
-	if data.OverrideURL != "" {
-		url = data.OverrideURL
-	} else {
-		url = makeCloudRunUrl(data)
-	}
-
-	// Store in provided map
-	key := makeKey(data.ServiceType, data.ProjectId)
-	upstreams[key] = url
-
-	return nil
-}
-
-func (l *Listener) ProcessDomainDoc(ctx context.Context, doc *firestore.DocumentSnapshot, projection map[string]string) error {
-	var data DomainDoc
-	if err := doc.DataTo(&data); err != nil {
-		return err
-	}
-
-	// TODO: Active is not consistently set in the /domains collection, make sure
-	// it is for new domains and then we can use it here when streamlit is dead:
-	// if !data.Active {
-	// 	return nil
-	// }
-	// if data.Validation != "validated" {
-	// 	return nil
-	// }
-	if data.ProjectId == "" {
-		// Treating missing projectId as "do not route"
-		return nil
-	}
-
-	customDomain := doc.Ref.ID
-	projection[customDomain] = data.ProjectId
-
-	// l.logger.Warn(fmt.Sprintf("ADDED %s  %s", customDomain, data.ProjectId))
-
-	return nil
-}
-
-func (l *Listener) RunListener(ctx context.Context, initWg *sync.WaitGroup, collection string) error {
-	// Maybe there's an abstraction waiting to be created here
-	var processDoc func(ctx context.Context, doc *firestore.DocumentSnapshot, upstreams map[string]string) error
-	var stringMap *safemap.SafeStringMap
-	switch collection {
-	case CollectionAppbutlers:
-		processDoc = l.ProcessAppbutlerDoc
-		stringMap = l.upstreams
-	case CollectionDomains:
-		processDoc = l.ProcessDomainDoc
-		stringMap = l.domainProjects
-	default:
-		return fmt.Errorf("invalid collection %s", collection)
-	}
+func (l *Listener) RunListener(ctx context.Context, initWg *sync.WaitGroup, newProjection func() Projection) error {
+	collection := newProjection().Collection()
 
 	hub := sentry.GetHubFromContext(ctx)
 	log := l.logger.With(zap.String("collection", collection))
@@ -259,7 +130,7 @@ func (l *Listener) RunListener(ctx context.Context, initWg *sync.WaitGroup, coll
 		}
 
 		// In each iteration, build a new map, this needs no synchronization
-		projection := make(map[string]string)
+		projection := newProjection()
 
 		countDocs := 0
 		countErrors := 0
@@ -287,7 +158,7 @@ func (l *Listener) RunListener(ctx context.Context, initWg *sync.WaitGroup, coll
 			}
 
 			// Process a single document
-			if err := processDoc(ctx, doc, projection); err != nil {
+			if err := projection.Update(ctx, doc); err != nil {
 				// Notify us of errors but keep going
 				hub.WithScope(func(scope *sentry.Scope) {
 					scope.SetTag("id", doc.Ref.ID)
@@ -302,7 +173,7 @@ func (l *Listener) RunListener(ctx context.Context, initWg *sync.WaitGroup, coll
 		}
 
 		// Swap in the new projection
-		stringMap.SetMap(projection)
+		projection.Swap(l)
 
 		if countErrors > 0 {
 			log.Error("Listener processed snapshot with errors",
@@ -328,38 +199,6 @@ func (l *Listener) CountUpstreams() int {
 
 func (l *Listener) CountDomains() int {
 	return len(l.domainProjects.GetMap())
-}
-
-// This is a paranoia and metrics wrapper
-func (l *Listener) RunWithoutCrashing(ctx context.Context, initWg *sync.WaitGroup, collection string) error {
-	log := l.logger.With(zap.String("collection", collection))
-
-	hub := sentry.GetHubFromContext(ctx)
-	hub.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetTag("startTime", time.Now().UTC().Format(time.RFC3339))
-	})
-
-	startTime := time.Now()
-	err := dontpanic.DontPanic(func() error {
-		return l.RunListener(ctx, initWg, collection)
-	})
-	runTime := time.Since(startTime)
-
-	log = log.With(zap.Duration("runTime", runTime))
-
-	if err != nil {
-		hub.WithScope(func(scope *sentry.Scope) {
-			scope.SetLevel(sentry.LevelError)
-			scope.SetTag("runTime", runTime.String())
-			hub.CaptureException(err)
-		})
-		log.Error("Listener failed", zap.Error(err))
-		return err
-	}
-
-	// Returns nil for graceful shutdown
-	log.Info("Listener shutting down")
-	return nil
 }
 
 // Interface guards

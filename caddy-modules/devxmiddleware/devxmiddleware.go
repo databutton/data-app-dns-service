@@ -255,13 +255,10 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			// App served from databutton.com, devx and legacy prodx cases
 			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
 			corsOrigin = originHeader
-		} else if strings.HasSuffix(originHost, ".databutton.app") || strings.HasSuffix(originHost, ".databutton.com") {
+		} else if strings.HasSuffix(originHost, ".databutton.app") {
 			// New style hosting at per-user subdomains
 			r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
 			username := strings.TrimSuffix(originHost, ".databutton.app")
-
-			// FIXME: Move to .app, drop .com case
-			username = strings.TrimSuffix(username, ".databutton.com")
 
 			// FIXME: Only set cors if username is owner of projectID,
 			// need some adjusted data model to listen to
@@ -311,7 +308,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Look up upstream URL
-	upstream := m.listener.LookupUpUrl(projectID, serviceType)
+	upstream := m.listener.LookupUpstreamHost(projectID, serviceType)
 	if upstream == "" {
 		m.logger.Warn("MIDDLEWARE: BLANK UPSTREAM")
 	}

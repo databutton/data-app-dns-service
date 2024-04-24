@@ -92,14 +92,14 @@ func (m *ListenerModule) startListener() (*storelistener.Listener, error) {
 		return nil, err
 	}
 
-	runListener := func(collection string, initWg *sync.WaitGroup) {
+	runListener := func(initWg *sync.WaitGroup, newProjection func() storelistener.Projection) {
 		defer listenerCancel()
 
 		hub := m.hub.Clone()
 		ctx := sentry.SetHubOnContext(listenerCtx, hub)
 
 		// This should run forever or until canceled...
-		err := listener.RunListener(ctx, initWg, collection)
+		err := listener.RunListener(ctx, initWg, newProjection)
 
 		// Graceful cancellation
 		if errors.Is(ctx.Err(), context.Canceled) {
@@ -115,11 +115,11 @@ func (m *ListenerModule) startListener() (*storelistener.Listener, error) {
 
 	appbutlersInitWg := new(sync.WaitGroup)
 	appbutlersInitWg.Add(1)
-	go runListener(storelistener.CollectionAppbutlers, appbutlersInitWg)
+	go runListener(appbutlersInitWg, storelistener.NewAppbutlersProjection)
 
 	domainsInitWg := new(sync.WaitGroup)
 	domainsInitWg.Add(1)
-	go runListener(storelistener.CollectionDomains, domainsInitWg)
+	go runListener(domainsInitWg, storelistener.NewDomainsProjection)
 
 	m.waitForInitialLoad = func() {
 		domainsInitWg.Wait()

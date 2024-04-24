@@ -16,10 +16,15 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/databutton/data-app-dns-service/caddy-modules/devxlistener"
-	"github.com/databutton/data-app-dns-service/pkg/storelistener"
 	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
 )
+
+type LookerUper interface {
+	LookupUpProjectIdFromDomain(domain string) string
+	LookupUpstreamHost(projectID, serviceType string) string
+	LookupUsername(projectID, serviceType string) string
+}
 
 type DevxMiddlewareModule struct {
 	// Configuration fields, if any
@@ -28,7 +33,7 @@ type DevxMiddlewareModule struct {
 	// Internal state
 	debug            bool
 	logger           *zap.Logger
-	listener         *storelistener.Listener // TODO: Nicer to store as narrower interface
+	listener         LookerUper
 	mockUpstreamHost string
 }
 
@@ -260,15 +265,28 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
 			username := strings.TrimSuffix(originHost, ".databutton.app")
 
-			// FIXME: Only set cors if username is owner of projectID,
-			// need some adjusted data model to listen to
-			if username != "" {
+			// Look up username of owner of project
+			ownerUsername := m.listener.LookupUsername(projectID, serviceType)
+
+			// Only set cors if username is owner of projectID
+			if username == ownerUsername {
 				corsOrigin = originHeader
+			} else {
+				// Attempt at accessing another project, just return 401 right away
+				m.logger.Error(
+					"Attempt at accessing another users project",
+					zap.String("originHost", originHost),
+					zap.String("ownerUsername", ownerUsername),
+					zap.String("username", username),
+					zap.String("projectID", projectID),
+				)
+				w.WriteHeader(http.StatusUnauthorized)
+				return nil
 			}
 		} else if isDevx && strings.HasPrefix(originHost, "localhost") {
 			// Call comes from localhost, i.e. running webapp locally
 			r.Header.Set("X-Dbtn-Proxy-Case", "localhost-for-dev")
-			// TODO: This is not supposed to be necessary, if only vite proxies
+			// TODO: This would not be necessary if vite proxies
 			//       were set up to set Origin to https://databutton.com
 			corsOrigin = originHeader
 		} else {
@@ -285,7 +303,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			} else {
 				// Attempt at accessing another project, just return 401 right away
 				m.logger.Error(
-					"Attempt at accessing another project",
+					"Attempt at accessing project not associated with domain",
 					zap.String("originHost", originHost),
 					zap.String("originProjectID", originProjectID),
 					zap.String("projectID", projectID),

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"github.com/getsentry/sentry-go"
 )
 
 // Partial Appbutler document to be parsed from firestore document
@@ -97,7 +98,38 @@ func (p *AppbutlersProjection) Update(ctx context.Context, doc *firestore.Docume
 	return nil
 }
 
+func (p *AppbutlersProjection) LogSwapResults(oldMap, newMap map[string]string) {
+	if len(oldMap) == 0 {
+		sentry.WithScope(func(scope *sentry.Scope) {
+			scope.SetExtra("oldUpstreams", len(oldMap))
+			scope.SetExtra("newUpstreams", len(newMap))
+			sentry.CaptureMessage("Set initial upstreams")
+		})
+	} else {
+		added := make(map[string]struct{})
+		removed := make(map[string]struct{})
+		for k := range oldMap {
+			if _, ok := newMap[k]; !ok {
+				removed[k] = struct{}{}
+			}
+		}
+		for k := range newMap {
+			if _, ok := oldMap[k]; !ok {
+				added[k] = struct{}{}
+			}
+		}
+		sentry.WithScope(func(scope *sentry.Scope) {
+			scope.SetExtra("oldUpstreams", len(oldMap))
+			scope.SetExtra("newUpstreams", len(newMap))
+			scope.SetExtra("added", len(added))
+			scope.SetExtra("removed", len(removed))
+			sentry.CaptureMessage("Swapped upstreams")
+		})
+	}
+}
+
 func (p *AppbutlersProjection) Swap(l *Listener) {
+	p.LogSwapResults(l.upstreams.GetMap(), p.upstreams)
 	l.upstreams.SetMap(p.upstreams)
 	l.usernames.SetMap(p.usernames)
 }

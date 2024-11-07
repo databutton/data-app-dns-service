@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -16,9 +17,10 @@ import (
 )
 
 type DevxUpstreamsModule struct {
-	hub      *sentry.Hub
-	logger   *zap.Logger
-	listener *storelistener.Listener
+	hub          *sentry.Hub
+	logger       *zap.Logger
+	listener     *storelistener.Listener
+	failureCount *atomic.Int64
 }
 
 func init() {
@@ -29,8 +31,10 @@ func init() {
 // CaddyModule returns the Caddy module information.
 func (DevxUpstreamsModule) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.reverse_proxy.upstreams.devx",
-		New: func() caddy.Module { return new(DevxUpstreamsModule) },
+		ID: "http.reverse_proxy.upstreams.devx",
+		New: func() caddy.Module {
+			return new(DevxUpstreamsModule)
+		},
 	}
 }
 
@@ -38,6 +42,7 @@ func (d *DevxUpstreamsModule) Provision(ctx caddy.Context) error {
 	// Get logger for the context of this caddy module instance
 	d.logger = ctx.Logger(d)
 	d.logger.Info("Provision called")
+	d.failureCount = &atomic.Int64{}
 	return nil
 }
 
@@ -60,6 +65,11 @@ func (d *DevxUpstreamsModule) GetUpstreams(r *http.Request) ([]*reverseproxy.Ups
 
 	// If no upstream was selected log and return error
 	if data.UpstreamHost == "" {
+		if n := d.failureCount.Add(1); n > 10 {
+			// FIXME: Shut down and restart listeners if we have several issues in a short period
+			d.failureCount.Store(0)
+		}
+
 		err := upstreamMissingError(data)
 		d.logger.Warn(
 			"Failed to get upstream",

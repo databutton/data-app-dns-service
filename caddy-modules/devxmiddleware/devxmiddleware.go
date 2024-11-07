@@ -16,6 +16,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/databutton/data-app-dns-service/caddy-modules/devxlistener"
+	"github.com/databutton/data-app-dns-service/pkg/storelistener"
 	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
 )
@@ -24,6 +25,11 @@ type LookerUper interface {
 	LookupUpProjectIdFromDomain(domain string) string
 	LookupUpstreamHost(projectID, serviceType string) string
 	LookupUsername(projectID, serviceType string) string
+}
+
+// For debugging
+type GetInfraer interface {
+	GetInfra() *storelistener.InfraProjection
 }
 
 type DevxMiddlewareModule struct {
@@ -142,6 +148,26 @@ func makeOriginalPath(projectID, serviceType, path string) string {
 	return fmt.Sprintf("/_projects/%s/dbtn/%s%s", projectID, serviceType, path)
 }
 
+func (m *DevxMiddlewareModule) DebugDumpDomains() {
+	fmt.Printf("/////// BEGIN DEBUGGING DOMAINS DUMP\n")
+	infra := m.listener.(GetInfraer).GetInfra()
+	infra.Domains.Range(func(k any, v any) bool {
+		fmt.Printf("  %s : %+v\n", k, v)
+		return true
+	})
+	fmt.Printf("/////// END DEBUGGING DOMAINS DUMP\n")
+}
+
+func (m *DevxMiddlewareModule) DebugDumpServices() {
+	fmt.Printf("/////// BEGIN DEBUGGING SERVICES DUMP\n")
+	infra := m.listener.(GetInfraer).GetInfra()
+	infra.Services.Range(func(k any, v any) bool {
+		fmt.Printf("  %s : %+v\n", k, v)
+		return true
+	})
+	fmt.Printf("/////// END DEBUGGING SERVICES DUMP\n")
+}
+
 // ServeHTTP implements caddyhttp.MiddlewareHandler
 func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request, h caddyhttp.Handler) error {
 	ctx := r.Context()
@@ -253,7 +279,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 	} else if projectID == "8de60c46-e25f-45fe-8df7-b5dd8b7f3b4d" {
 		// TODO: Add config for allowed origins to apps, special case for now
-		// extraAllowedOrigins := m.listener.GetAllowedOriginsForProject(originProjectID)
+		// extraAllowedOrigins := m.listener.LookupExtraAllowedOrigins(projectID, serviceType)
 		extraAllowedOrigins := []string{"*"}
 		for _, allowedOrigin := range extraAllowedOrigins {
 			if originHeader == allowedOrigin || allowedOrigin == "*" {
@@ -328,7 +354,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 	// Set cors headers allowing this origin
 	if corsOrigin != "" {
-		setCorsHeaders(m.logger, w, corsOrigin)
+		setCorsHeaders(w, corsOrigin)
 	}
 
 	// Short-circuit options requests
@@ -378,12 +404,13 @@ const (
 	ALLOWED_HEADERS = "Content-Type, Authorization, X-Authorization, X-Dbtn-Authorization, X-Dbtn-Baseurl, X-Dbtn-Webapp-Version, X-Request-Id"
 )
 
-func setCorsHeaders(logger *zap.Logger, w http.ResponseWriter, origin string) {
+func setCorsHeaders(w http.ResponseWriter, origin string) {
 	header := w.Header()
 	header.Set("Access-Control-Allow-Origin", origin)
 	header.Set("Access-Control-Allow-Methods", ALLOWED_METHODS)
 	header.Set("Access-Control-Allow-Headers", ALLOWED_HEADERS)
-	header.Set("Access-Control-Allow-Credentials", "true") // TODO: "false"?
+	// TODO: "false" to disallow sending cookies in some cases?
+	header.Set("Access-Control-Allow-Credentials", "true")
 
 	foundVary := false
 	for _, v := range header.Values("Vary") {

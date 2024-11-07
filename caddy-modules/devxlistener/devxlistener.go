@@ -5,7 +5,6 @@ package devxlistener
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -49,9 +48,14 @@ func (m *ListenerModule) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
+// Implement caddy.Provisioner interface
+// Provision is the caddy module entrypoint
 func (m *ListenerModule) Provision(ctx caddy.Context) error {
+	// Logger associated with this caddy module
 	m.logger = ctx.Logger()
 	m.logger.Info("LISTENER: Provision")
+
+	// Store a context that is cancelled when the module cleans up
 	m.ctx, m.cancel = context.WithCancel(ctx.Context)
 
 	// Make sure sentry is initialized
@@ -65,65 +69,45 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 		scope.SetTag("provisioningStartedAt", time.Now().UTC().Format(time.RFC3339))
 	})
 
-	// Create and start listener
+	// Create and start listener background process
 	l, err := m.startListener()
 	if err != nil {
 		return err
 	}
+
+	// This will be accessed by devxmiddleware before Start runs
 	m.listener = l
+
 	return nil
 }
 
 func (m *ListenerModule) startListener() (*storelistener.Listener, error) {
-	m.logger.Info("Initializing firestore listeners")
-
 	// Should we create a logger not associated with the caddy module instance? Seems to work fine.
 	logger := m.logger.With(zap.String("context", "projectsListener"))
+	logger.Info("Initializing firestore listeners")
 
-	// This use of context is a bit hacky, some refactoring can probably make the code cleaner.
-	// The listener will call cancel when Caddy Destructs it.
-	// That will cancel the listenerCtx which the runListener goroutines are running with.
-	listenerCtx, listenerCancel := context.WithCancel(context.Background())
+	// TODO: Should this use m.ctx as root context?
+	ctx := sentry.SetHubOnContext(context.Background(), m.hub.Clone())
+
 	listener, err := storelistener.NewFirestoreListener(
-		listenerCancel,
+		ctx,
 		logger,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	runListener := func(initWg *sync.WaitGroup, newProjection func() storelistener.Projection) {
-		defer listenerCancel()
+	// Waitgroup for signaling first sync
+	initWg := new(sync.WaitGroup)
+	initWg.Add(1)
+	firstSyncDone := sync.OnceFunc(func() { initWg.Done() })
 
-		hub := m.hub.Clone()
-		ctx := sentry.SetHubOnContext(listenerCtx, hub)
+	// This launches a goroutine that should run forever or until canceled...
+	listener.Start(firstSyncDone)
 
-		// This should run forever or until canceled...
-		err := listener.RunListener(ctx, initWg, newProjection)
-
-		// Graceful cancellation
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return
-		}
-
-		// Panic in a goroutine kills the program abruptly, lets do that
-		// unless we were canceled, such that the service restarts.
-		hub.CaptureException(err)
-		sentry.Flush(2 * time.Second)
-		panic(fmt.Errorf("run failed with error: %v", err))
-	}
-
-	appbutlersInitWg := new(sync.WaitGroup)
-	appbutlersInitWg.Add(1)
-	go runListener(appbutlersInitWg, storelistener.NewAppbutlersProjection)
-
-	domainsInitWg := new(sync.WaitGroup)
-	domainsInitWg.Add(1)
-	go runListener(domainsInitWg, storelistener.NewDomainsProjection)
-
+	// Delay waiting for init to finish until the Start method
 	m.waitForInitialLoad = func() {
-		domainsInitWg.Wait()
-		appbutlersInitWg.Wait()
+		initWg.Wait()
 
 		m.logger.Info("Initial listener data load complete",
 			zap.Int("upstreamsCount", m.listener.CountUpstreams()),
@@ -137,6 +121,7 @@ func (m *ListenerModule) startListener() (*storelistener.Listener, error) {
 // Start implements caddy.App
 func (m *ListenerModule) Start() error {
 	m.logger.Info("LISTENER: Start")
+
 	if m.waitForInitialLoad == nil {
 		m.logger.Error("LISTENER: Failed!")
 		return fmt.Errorf("Module has not been provisioned")

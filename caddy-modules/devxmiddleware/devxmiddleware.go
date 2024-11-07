@@ -251,6 +251,18 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			return nil
 		}
 
+	} else if projectID == "8de60c46-e25f-45fe-8df7-b5dd8b7f3b4d" {
+		// TODO: Add config for allowed origins to apps, special case for now
+		// extraAllowedOrigins := m.listener.GetAllowedOriginsForProject(originProjectID)
+		extraAllowedOrigins := []string{"*"}
+		for _, allowedOrigin := range extraAllowedOrigins {
+			if originHeader == allowedOrigin || allowedOrigin == "*" {
+				r.Header.Set("X-Dbtn-Proxy-Case", "extra-allowed-origins")
+				corsOrigin = originHeader
+				customDomain = originHost
+				break
+			}
+		}
 	} else {
 		isDevx := serviceType == "devx"
 		if originHeader == "" {

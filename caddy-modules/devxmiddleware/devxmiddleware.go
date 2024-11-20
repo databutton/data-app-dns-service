@@ -375,7 +375,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 const (
 	ALLOWED_METHODS = "POST, GET, PATCH, PUT, OPTIONS, DELETE"
-	ALLOWED_HEADERS = "Content-Type, X-Request-Id, Authorization, X-Dbtn-Webapp-Version, X-Dbtn-Baseurl, X-Authorization"
+	ALLOWED_HEADERS = "Content-Type, Authorization, X-Authorization, X-Dbtn-Authorization, X-Dbtn-Baseurl, X-Dbtn-Webapp-Version, X-Request-Id"
 )
 
 func setCorsHeaders(logger *zap.Logger, w http.ResponseWriter, origin string) {

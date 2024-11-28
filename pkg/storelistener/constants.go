@@ -7,5 +7,4 @@ const (
 
 const (
 	CollectionAppbutlers = "appbutlers"
-	CollectionDomains    = "domains"
 )

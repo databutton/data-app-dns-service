@@ -5,7 +5,6 @@ package devxlistener
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"time"
 
@@ -53,7 +52,7 @@ func (m *ListenerModule) CaddyModule() caddy.ModuleInfo {
 func (m *ListenerModule) Provision(ctx caddy.Context) error {
 	// Logger associated with this caddy module
 	m.logger = ctx.Logger()
-	m.logger.Info("LISTENER: Provision")
+	m.logger.Info("devxlistener: Provision")
 
 	// Store a context that is cancelled when the module cleans up
 	m.ctx, m.cancel = context.WithCancel(ctx.Context)
@@ -70,95 +69,75 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 	})
 
 	// Create and start listener background process
-	l, err := m.startListener()
+	initWg := new(sync.WaitGroup)
+	initWg.Add(1)
+	firstSyncDone := sync.OnceFunc(func() { initWg.Done() })
+	l, err := m.startListener(firstSyncDone)
 	if err != nil {
+		m.cancel()
 		return err
 	}
+	// Block caddy startup until the listener has loaded data once
+	initWg.Wait()
+
+	m.logger.Info("devxlistener: Provision done after initial listener data loading",
+		zap.Int("upstreamsCount", l.CountUpstreams()),
+		zap.Int("domainsCount", l.CountDomains()),
+	)
 
 	// This will be accessed by devxmiddleware before Start runs
 	m.listener = l
 
-	if m.waitForInitialLoad == nil {
-		m.logger.Error("LISTENER: Failed!")
-		return fmt.Errorf("Module has not been provisioned")
-	}
-
-	// Block caddy startup until the listener has loaded data once
-	m.waitForInitialLoad()
-
 	return nil
 }
 
-func (m *ListenerModule) startListener() (*storelistener.Listener, error) {
-	// Should we create a logger not associated with the caddy module instance? Seems to work fine.
-	logger := m.logger.With(zap.String("context", "projectsListener"))
-	logger.Info("Initializing firestore listeners")
+func (m *ListenerModule) startListener(firstSyncDone func()) (*storelistener.Listener, error) {
+	m.logger.Info("devxlistener: Starting firestore listener background process")
 
 	// TODO: Should this use m.ctx as root context?
 	ctx := sentry.SetHubOnContext(context.Background(), m.hub.Clone())
 
 	listener, err := storelistener.NewFirestoreListener(
 		ctx,
-		logger,
+		m.logger,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// Waitgroup for signaling first sync
-	initWg := new(sync.WaitGroup)
-	initWg.Add(1)
-	firstSyncDone := sync.OnceFunc(func() { initWg.Done() })
-
 	// This launches a goroutine that should run forever or until canceled...
 	listener.Start(firstSyncDone)
-
-	// Delay waiting for init to finish until the Start method
-	m.waitForInitialLoad = func() {
-		initWg.Wait()
-
-		m.logger.Info("Initial listener data load complete",
-			zap.Int("upstreamsCount", m.listener.CountUpstreams()),
-			zap.Int("domainsCount", m.listener.CountDomains()),
-		)
-	}
 
 	return listener, nil
 }
 
 // Start implements caddy.App
 func (m *ListenerModule) Start() error {
-	m.logger.Info("LISTENER: Start")
-
-	m.logger.Info("LISTENER: Start exiting")
+	m.logger.Info("devxlistener: Start")
 	return nil
 }
 
 // Stop implements caddy.App
 func (m *ListenerModule) Stop() error {
-	m.logger.Info("LISTENER: Stop")
+	m.logger.Info("devxlistener: Stop")
 	m.cancel()
-
 	// Flush buffered events before the program terminates.
 	sentry.Flush(2 * time.Second)
-
 	return nil
 }
 
 // Validate implements caddy.Validator, called after Provision
 func (m *ListenerModule) Validate() error {
-	m.logger.Info("LISTENER: Validate")
+	m.logger.Info("devxlistener: Validate")
 	return nil
 }
 
 // Cleanup implements caddy.CleanerUpper
 func (m *ListenerModule) Cleanup() error {
-	m.logger.Info("LISTENER: Cleanup")
+	m.logger.Info("devxlistener: Cleanup")
 	m.cancel()
-
 	// Flush buffered events before the program terminates.
 	sentry.Flush(2 * time.Second)
-
 	return nil
 }
 

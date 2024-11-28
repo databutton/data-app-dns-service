@@ -1,11 +1,15 @@
 package dontpanic
 
-import "fmt"
+import "github.com/pkg/errors"
 
 func DontPanic(f func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
+			if err, ok := r.(error); ok {
+				err = errors.Wrap(err, "recovered panic")
+			} else {
+				err = errors.Errorf("recovered panic: %v", r)
+			}
 		}
 	}()
 	err = f()

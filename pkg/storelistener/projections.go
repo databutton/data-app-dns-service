@@ -55,10 +55,10 @@ func (data AppbutlerDoc) Fields() []string {
 
 func (data *AppbutlerDoc) validate() error {
 	if data.ProjectId == "" || data.ServiceType == "" {
-		return fmt.Errorf("insufficient data to identify service purpose")
+		return ErrMissingServiceIdentityData
 	}
 	if data.OverrideURL == "" && (data.RegionCode == "" || data.CloudRunServiceId == "") {
-		return fmt.Errorf("insufficient data to construct upstream url")
+		return ErrMissingUpstreamData
 	}
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/AlekSi/pointer"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/getsentry/sentry-go"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -33,9 +34,10 @@ type Listener struct {
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
 
-	cancelSnapshots context.CancelFunc
-	failureCount    *atomic.Int64
-	lastRestartTime time.Time
+	failureBudget         *atomic.Int64
+	restartCount          *atomic.Int64
+	lastCheckFailuresTime time.Time
+	lastRestartTime       time.Time
 
 	infra      *InfraProjection
 	infraMutex sync.RWMutex
@@ -56,9 +58,10 @@ func NewFirestoreListener(ctx context.Context, logger *zap.Logger) (*Listener, e
 		firestoreClient: client,
 		logger:          logger,
 
-		cancelSnapshots: nil,
-		failureCount:    &atomic.Int64{},
-		lastRestartTime: time.Now(),
+		failureBudget:         &atomic.Int64{},
+		restartCount:          &atomic.Int64{},
+		lastCheckFailuresTime: time.Now(),
+		lastRestartTime:       time.Now(),
 
 		infra: NewInfraProjection(),
 	}
@@ -89,11 +92,12 @@ func (l *Listener) Start(firstSyncDone func()) {
 	go l.retryForever(l.ctx, firstSyncDone)
 }
 
-func (l *Listener) DieNow(err error) {
+func (l *Listener) DieNow() {
 	l.cancel()
 	sentry.Flush(2 * time.Second)
-	l.logger.Fatal("KILLING SERVICE FROM LISTENER", zap.Error(err))
-	panic(err)
+	l.logger.Fatal("KILLING SERVICE FROM LISTENER")
+	// I don't think we get past the fatal log
+	panic(ErrUnalivingService)
 }
 
 // Note: If this panics we want it to blow up the service
@@ -107,30 +111,48 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 		sentry.Flush(2 * time.Second)
 	}()
 
-	// Only quit if canceled
-	attempt := 0
+	// - If time since last restart is < 60 seconds, count restarts
+	// - If restarts > 5, die to restart service
+	restartCount := 0
+
+	// Loop until canceled
 	for ctx.Err() == nil {
+		lastRestartTime := time.Now()
+
 		err := l.listenToSnapshots(ctx, firstSyncDone)
 		if err != nil {
-			l.logger.Error("listenToSnapshots failed", zap.Error(err))
-			hub.CaptureException(fmt.Errorf("listenToSnapshots failed: %+v", err))
+			l.logger.Error("listenToSnapshots returned error", zap.Error(err))
+			hub.CaptureException(errors.Wrap(err, "listenToSnapshots returned error"))
 		} else {
 			l.logger.Error("listenToSnapshots returned without error")
 			hub.CaptureMessage("listenToSnapshots returned without error")
 		}
 
-		attempt += 1
-		if attempt > 4 {
+		// If the listener has worked for some time,
+		// just reset and restart right away with no delay
+		const acceptableRestartPeriod = 5 * time.Minute
+		timeSince := time.Since(lastRestartTime)
+		if timeSince > acceptableRestartPeriod {
+			restartCount = 0
+			l.logger.Error("restarting listenToSnapshots immediately")
+			hub.CaptureMessage("restarting listenToSnapshots immediately")
+			continue
+		}
+
+		// As long as we're looking at more rapid restarts, let the counter run
+		restartCount++
+		// and if we get a lot of them just die
+		if restartCount > 10 {
 			// Not expecting this to happen a lot so we should ideally never get here,
 			// but if firestore connections are rotten or something then a forceful
 			// full service restart may be better
-			err := fmt.Errorf("Snapshot listener has failed too many times, killing service")
-			hub.CaptureException(err)
-			l.DieNow(err)
+			hub.CaptureException(ErrSnapshotListenerFailed)
+			l.DieNow()
 		}
 
-		l.logger.Warn("firestorelistener.retryForever sleeping before new snapshot listening attempt", zap.Int("attempt", attempt))
-		time.Sleep(500 * time.Millisecond)
+		// Don't restart too quickly
+		l.logger.Warn("firestorelistener.retryForever sleeping before next listenToSnapshots attempt", zap.Int("restartCount", restartCount))
+		time.Sleep(time.Second)
 	}
 }
 
@@ -143,7 +165,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 
 	col := l.firestoreClient.Collection(collection)
 	if col == nil {
-		panic(fmt.Errorf("could not get collection %s", collection))
+		panic(errors.Errorf("Collection %s not found", collection))
 	}
 
 	query := col.
@@ -169,6 +191,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 	infra := NewInfraProjection()
 	first := true
 	totalErrorCount := 0
+	l.resetFailures()
 
 	// Until canceled
 	for ctx.Err() == nil {
@@ -186,7 +209,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 				l.logger.Info("Processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount))
 			}
 
-			if err := l.CircuitBroken(); err != nil {
+			if err := l.checkFailures(); err != nil {
 				return err
 			}
 
@@ -208,7 +231,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 				firstSyncDone()
 			} else {
 				if SIMULATE_FAILURE {
-					return fmt.Errorf("SIMULATING FAILURE")
+					return ErrSimulatedFailure
 				}
 			}
 		}
@@ -220,7 +243,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 func (l *Listener) dumpMetrics(snap *firestore.QuerySnapshot) {
 	metrics, err := snap.Documents.ExplainMetrics()
 	if err != nil || metrics == nil || metrics.PlanSummary == nil {
-		panic(fmt.Errorf("Failed to get metrics %+v", err))
+		panic(errors.Wrap(err, "Failed to get metrics"))
 	}
 	for _, idx := range metrics.PlanSummary.IndexesUsed {
 		if idx != nil {
@@ -291,25 +314,6 @@ func (l *Listener) processSnapshot(ctx context.Context, infra *InfraProjection, 
 	return len(snap.Changes), errorCount
 }
 
-func (l *Listener) CountLookupFailure() {
-	l.failureCount.Add(1)
-}
-
-func (l *Listener) CircuitBroken() error {
-	// Note about this number: multiple lookups may add to it, so I think it shouldn't be set too small
-	const restartAfterFailureCount = 100
-	if l.failureCount.Load() < restartAfterFailureCount {
-		return nil
-	}
-
-	const minimumRestartWait = 10 * time.Second
-	if time.Since(l.lastRestartTime) < minimumRestartWait {
-		return nil
-	}
-
-	return fmt.Errorf("Too many errors, restarting snapshot listener")
-}
-
 func (l *Listener) SetInfra(infra *InfraProjection) {
 	l.infraMutex.Lock()
 	defer l.infraMutex.Unlock()
@@ -327,7 +331,7 @@ func (l *Listener) GetInfra() *InfraProjection {
 func (l *Listener) LookupUpstreamHost(projectID, serviceType string) string {
 	service, ok := l.GetInfra().GetService(projectID, serviceType)
 	if !ok {
-		l.CountLookupFailure()
+		l.registerFailure()
 	}
 	return service.Upstream
 }
@@ -335,21 +339,59 @@ func (l *Listener) LookupUpstreamHost(projectID, serviceType string) string {
 // LookupUsername does an optimized cache lookup to get the username for a project.
 // The rest of this Listener code is basically written to support this fast lookup.
 func (l *Listener) LookupUsername(projectID, serviceType string) string {
-	service, ok := l.GetInfra().GetService(projectID, serviceType)
-	if !ok {
-		l.CountLookupFailure()
-	}
+	service, _ := l.GetInfra().GetService(projectID, serviceType)
 	return service.Username
 }
 
 // LookupUpProjectIdFromDomain does an optimized cache lookup to get the projectId a custom domain is associated with.
 // The rest of this Listener code is basically written to support this fast lookup.
 func (l *Listener) LookupUpProjectIdFromDomain(customDomain string) string {
-	domain, ok := l.GetInfra().GetDomain(customDomain)
-	if !ok {
-		l.CountLookupFailure()
-	}
+	domain, _ := l.GetInfra().GetDomain(customDomain)
 	return domain.ProjectId
+}
+
+// Parameters for failure budget tuning
+const (
+	maxFailureBudget           = 100
+	budgetPerSecond            = 0.1
+	minimumTimeBetweenRestarts = 30 * time.Second
+)
+
+func (l *Listener) resetFailures() {
+	l.failureBudget.Store(maxFailureBudget)
+	l.lastRestartTime = time.Now()
+}
+
+func (l *Listener) registerFailure() int {
+	return int(l.failureBudget.Add(-1))
+}
+
+func (l *Listener) checkFailures() error {
+	// Add some failure budget over time, this way we'll always tend to go back to the max,
+	// and need sustained errors over some time to actually call it failure
+	addToBudget := int64(time.Since(l.lastCheckFailuresTime).Seconds() * budgetPerSecond)
+	l.lastCheckFailuresTime = time.Now()
+
+	// Add and clamp to max
+	budget := l.failureBudget.Load()
+	budget += addToBudget
+	if budget > maxFailureBudget {
+		budget = maxFailureBudget
+	}
+
+	// Store the new budget, ignore if it has been touched between, this is not that accurate anyway
+	l.failureBudget.Store(budget)
+
+	// Don't restart too rapidly
+	if time.Since(l.lastRestartTime) < minimumTimeBetweenRestarts {
+		return nil
+	}
+
+	// Break circuit if we're out of failure budget
+	if budget <= 0 {
+		return ErrCircuitBroken
+	}
+	return nil
 }
 
 func (l *Listener) CountUpstreams() int {

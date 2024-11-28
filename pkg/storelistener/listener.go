@@ -58,8 +58,8 @@ func NewFirestoreListener(ctx context.Context, logger *zap.Logger) (*Listener, e
 		firestoreClient: client,
 		logger:          logger,
 
-		failureBudget:         &atomic.Int64{},
-		restartCount:          &atomic.Int64{},
+		failureBudget:         new(atomic.Int64),
+		restartCount:          new(atomic.Int64),
 		lastCheckFailuresTime: time.Now(),
 		lastRestartTime:       time.Now(),
 
@@ -181,17 +181,40 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 
 	// TODO: Get this from env var to run locally
 	// TODO: Review query performance explanation!
-	const getMetrics = false
-
-	if getMetrics {
-		query = query.WithRunOptions(firestore.ExplainOptions{Analyze: getMetrics})
-	}
+	// const getMetrics = false
+	// if getMetrics {
+	// 	query = query.WithRunOptions(firestore.ExplainOptions{Analyze: getMetrics})
+	// 	snapIter := query.Snapshots(ctx)
+	// 	docsIter := snapIter.Query.Documents(ctx)
+	// 	docs, err := docsIter.GetAll()
+	// 	// docsIter.Stop()
+	// 	metrics, err := docsIter.ExplainMetrics()
+	// 	l.dumpMetrics(snap)
+	// 	return nil
+	// }
 
 	// Create a fresh blank infra projection to populate
 	infra := NewInfraProjection()
 	first := true
-	totalErrorCount := 0
+
+	totalChangeCount := new(atomic.Int64)
+	totalErrorCount := new(atomic.Int64)
 	l.resetFailures()
+
+	// Check for failures regularly and use cancel to restart listener
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			err := l.checkFailures()
+			l.logger.Info("Listener health check", zap.Time("lastRestartTime", l.lastRestartTime), zap.Int64("totalChanges", totalChangeCount.Load()), zap.Int64("totalErrors", totalErrorCount.Load()), zap.Error(err))
+			if err != nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Second)
+		}
+	}()
 
 	// Until canceled
 	for ctx.Err() == nil {
@@ -199,30 +222,21 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 		for ctx.Err() == nil {
 			snap, err := snapIter.Next()
 			if err != nil {
+				l.logger.Error("Snapshot iterator error", zap.Error(err))
 				return err
 			}
 
 			batchChangeCount, batchErrorCount := l.processSnapshot(ctx, infra, snap)
-			totalErrorCount += batchErrorCount
+			totalChangeCount.Add(int64(batchChangeCount))
+			totalErrorCount.Add(int64(batchErrorCount))
 
-			if DEBUGGING {
-				l.logger.Info("Processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount))
-			}
-
-			if err := l.checkFailures(); err != nil {
-				return err
-			}
+			// Nice to have in logs while the system is new
+			// if DEBUGGING {
+			l.logger.Info("Processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount))
+			//}
 
 			if first {
 				first = false
-
-				if getMetrics {
-					// TODO: panic: Failed to get metrics firestore: ExplainMetrics are available only after the iterator reaches the end
-					snapIter.Stop()
-					l.dumpMetrics(snap)
-					l.cancel()
-					return nil
-				}
 
 				// Swap out the infra projection after the first snapshot has completed processing
 				l.SetInfra(infra)
@@ -362,18 +376,22 @@ func (l *Listener) resetFailures() {
 	l.lastRestartTime = time.Now()
 }
 
+// NB! This is called from upstreams module threads!
 func (l *Listener) registerFailure() int {
+	l.logger.Info("listener: registering failure")
 	return int(l.failureBudget.Add(-1))
 }
 
+// TODO: If we don't get any appbutler changes this never runs...
 func (l *Listener) checkFailures() error {
+	budget := l.failureBudget.Load()
+
 	// Add some failure budget over time, this way we'll always tend to go back to the max,
 	// and need sustained errors over some time to actually call it failure
 	addToBudget := int64(time.Since(l.lastCheckFailuresTime).Seconds() * budgetPerSecond)
 	l.lastCheckFailuresTime = time.Now()
 
 	// Add and clamp to max
-	budget := l.failureBudget.Load()
 	budget += addToBudget
 	if budget > maxFailureBudget {
 		budget = maxFailureBudget

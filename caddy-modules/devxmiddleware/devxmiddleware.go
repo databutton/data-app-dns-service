@@ -86,7 +86,7 @@ func (m *DevxMiddlewareModule) setMockStateFromEnv() {
 			m.logger.Error("failed to parse mock url", zap.String("mockurl", mockUrl))
 		} else {
 			m.mockUpstreamHost = u.Host
-			m.logger.Warn("MOCKING ALL UPSTREAM HOSTS!",
+			m.logger.Warn("TEST MODE: MOCKING ALL UPSTREAM HOSTS!",
 				zap.String("mockUpstreamHost", m.mockUpstreamHost),
 			)
 		}
@@ -96,13 +96,13 @@ func (m *DevxMiddlewareModule) setMockStateFromEnv() {
 // Validate implements caddy.Validator
 // Called after Provision.
 func (m *DevxMiddlewareModule) Validate() error {
-	m.logger.Info("MIDDLEWARE: Validate")
+	m.logger.Info("devxmiddleware: Validate")
 	return nil
 }
 
 // Cleanup implements caddy.CleanerUpper
 func (m *DevxMiddlewareModule) Cleanup() error {
-	m.logger.Info("MIDDLEWARE: Cleanup")
+	m.logger.Info("devxmiddleware: Cleanup")
 	return nil
 }
 
@@ -366,7 +366,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// Look up upstream URL
 	upstream := m.listener.LookupUpstreamHost(projectID, serviceType)
 	if upstream == "" {
-		m.logger.Warn("MIDDLEWARE: BLANK UPSTREAM")
+		m.logger.Warn("devxmiddleware: upstream is blank")
 	}
 
 	// For testing what gets passed on by caddy to upstream

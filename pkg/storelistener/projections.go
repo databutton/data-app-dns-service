@@ -1,188 +1,186 @@
 package storelistener
 
 import (
-	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/getsentry/sentry-go"
 )
 
 // Partial Appbutler document to be parsed from firestore document
 type AppbutlerDoc struct {
-	UpdateTime          time.Time
-	MarkedForDeletionAt *time.Time `firestore:"markedForDeletionAt"`
-	ProjectId           string     `firestore:"projectId,omitempty"`
-	ServiceType         string     `firestore:"serviceType,omitempty"`
-	RegionCode          string     `firestore:"regionCode,omitempty"`
-	CloudRunServiceId   string     `firestore:"cloudRunServiceId,omitempty"`
-	ServiceIsReady      bool       `firestore:"serviceIsReady,omitempty"`
-	OverrideURL         string     `firestore:"overrideURL,omitempty"`
-	Username            string     `firestore:"username,omitempty"`
-	CustomDomain        string     `firestore:"customDomain,omitempty"`
+	UpdateTime time.Time
+
+	// Which project is it owned by (should never be blank now)
+	ProjectId string `firestore:"projectId,omitempty"`
+
+	// What is the service for (devx or prodx)
+	ServiceType string `firestore:"serviceType,omitempty"`
+
+	// Is it ready to serve (should always be true now)
+	// ServiceIsReady      bool       `firestore:"serviceIsReady,omitempty"`
+
+	// Is it not deleted (should always be nil now)
+	// MarkedForDeletionAt *time.Time  `firestore:"markedForDeletionAt,omitempty"`
+
+	// What is the url of the target service
+	// ... in google cloud run
+	RegionCode        string `firestore:"regionCode,omitempty"`
+	CloudRunServiceId string `firestore:"cloudRunServiceId,omitempty"`
+	// ... or anywhere else
+	OverrideURL string `firestore:"overrideURL,omitempty"`
+
+	// Where is it deployed (no CustomDomain means username.databutton.app)
+	Username     string `firestore:"username,omitempty"`
+	CustomDomain string `firestore:"customDomain,omitempty"`
 }
 
-type AppbutlersProjection struct {
-	upstreams map[string]string
-	usernames map[string]string
-}
-
-func NewAppbutlersProjection() Projection {
-	return &AppbutlersProjection{
-		upstreams: make(map[string]string),
-		usernames: make(map[string]string),
+func (data AppbutlerDoc) Fields() []string {
+	return []string{
+		"projectId",
+		"serviceType",
+		//
+		"markedForDeletionAt",
+		"serviceIsReady",
+		//
+		"regionCode",
+		"cloudRunServiceId",
+		"overrideURL",
+		//
+		"username",
+		"customDomain",
 	}
 }
 
-func (p *AppbutlersProjection) Collection() string {
-	return CollectionAppbutlers
+func (data *AppbutlerDoc) validate() error {
+	if data.ProjectId == "" || data.ServiceType == "" {
+		return fmt.Errorf("insufficient data to identify service purpose")
+	}
+	if data.OverrideURL == "" && (data.RegionCode == "" || data.CloudRunServiceId == "") {
+		return fmt.Errorf("insufficient data to construct upstream url")
+	}
+	return nil
 }
 
-func (p *AppbutlersProjection) shouldSkipAppbutler(data AppbutlerDoc) bool {
-	if data.ProjectId == "" {
-		// Skip free pool appbutlers without assigned projects, there's nothing to route
-		return true
-	}
-
-	if !data.ServiceIsReady {
-		// Skip before service is ready to receive requests
-		return true
-	}
-
-	if data.MarkedForDeletionAt != nil {
-		// Skip when marked for garbage collection
-		return true
-	}
-
-	return false
-}
-
-func (p *AppbutlersProjection) makeCloudRunUrl(data AppbutlerDoc) string {
+func (data *AppbutlerDoc) makeTargetUrl() string {
 	if data.OverrideURL != "" {
 		return data.OverrideURL
 	}
-	return fmt.Sprintf(
-		"%s-%s-%s.a.run.app:443",
-		data.CloudRunServiceId,
-		GCP_PROJECT_HASH,
-		data.RegionCode,
-	)
+
+	if data.CloudRunServiceId != "" && data.RegionCode != "" {
+		return fmt.Sprintf(
+			"%s-%s-%s.a.run.app:443",
+			data.CloudRunServiceId,
+			GCP_PROJECT_HASH,
+			data.RegionCode,
+		)
+	}
+
+	return ""
 }
 
-func (p *AppbutlersProjection) Update(ctx context.Context, doc *firestore.DocumentSnapshot) error {
+type ServiceKey struct {
+	ProjectId   string
+	ServiceType string
+}
+
+// Make key for upstreams map lookup
+func (sk ServiceKey) String() string {
+	return sk.ProjectId + sk.ServiceType
+}
+
+type ServiceValues struct {
+	Upstream string
+	Username string
+}
+
+type DomainValues struct {
+	ProjectId string
+}
+
+type InfraProjection struct {
+	Services *sync.Map
+	Domains  *sync.Map
+}
+
+func NewInfraProjection() *InfraProjection {
+	return &InfraProjection{
+		Services: &sync.Map{},
+		Domains:  &sync.Map{},
+	}
+}
+
+func (p *InfraProjection) Remove(doc *firestore.DocumentSnapshot) error {
+	// FIXME: TEST Will we get any data here when it has been removed?
+	//        Or will we need to add a map to index from doc.ID to service key?
+	// id := doc.Ref.ID
+
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
 		return err
 	}
 
-	if p.shouldSkipAppbutler(data) {
-		return nil
-	}
+	serviceKey := ServiceKey{ProjectId: data.ProjectId, ServiceType: data.ServiceType}.String()
+	p.Services.Delete(serviceKey)
 
-	if data.ProjectId == "" {
-		return fmt.Errorf("missing projectId")
-	} else if data.ServiceType == "" {
-		return fmt.Errorf("missing serviceType")
-	} else if data.RegionCode == "" {
-		return fmt.Errorf("missing regionCode")
-	} else if data.CloudRunServiceId == "" && data.OverrideURL == "" { // Updated this line to check for OverrideURL as well
-		return fmt.Errorf("missing cloudRunServiceId")
+	if data.CustomDomain != "" {
+		domain, ok := p.Domains.Load(data.CustomDomain)
+		if ok {
+			// Note: There's some potential for getting things wrong here if the source data
+			// doesn't adhere to expected invariants such as projectid 1-1 domain
+			if domain.(DomainValues).ProjectId == data.ProjectId {
+				p.Domains.Delete(data.CustomDomain)
+			}
+		}
 	}
-
-	// Add to projection maps
-	key := makeKey(data.ServiceType, data.ProjectId)
-	p.upstreams[key] = p.makeCloudRunUrl(data)
-	p.usernames[key] = data.Username
 
 	return nil
 }
 
-func (p *AppbutlersProjection) LogSwapResults(oldMap, newMap map[string]string) {
-	if len(oldMap) == 0 {
-		sentry.WithScope(func(scope *sentry.Scope) {
-			scope.SetExtra("oldUpstreams", len(oldMap))
-			scope.SetExtra("newUpstreams", len(newMap))
-			sentry.CaptureMessage("Set initial upstreams")
-		})
-	} else {
-		added := make(map[string]struct{})
-		removed := make(map[string]struct{})
-		for k := range oldMap {
-			if _, ok := newMap[k]; !ok {
-				removed[k] = struct{}{}
-			}
-		}
-		for k := range newMap {
-			if _, ok := oldMap[k]; !ok {
-				added[k] = struct{}{}
-			}
-		}
-		sentry.WithScope(func(scope *sentry.Scope) {
-			scope.SetExtra("oldUpstreams", len(oldMap))
-			scope.SetExtra("newUpstreams", len(newMap))
-			scope.SetExtra("added", len(added))
-			scope.SetExtra("removed", len(removed))
-			sentry.CaptureMessage("Swapped upstreams")
-		})
-	}
-}
-
-func (p *AppbutlersProjection) Swap(l *Listener) {
-	p.LogSwapResults(l.upstreams.GetMap(), p.upstreams)
-	l.upstreams.SetMap(p.upstreams)
-	l.usernames.SetMap(p.usernames)
-}
-
-// Partial Domain document to be parsed from firestore document
-type DomainDoc struct {
-	Active     bool   `firestore:"active"`
-	Validation string `firestore:"validation"`
-	ProjectId  string `firestore:"projectId"`
-}
-
-type DomainsProjection struct {
-	domainProjects map[string]string
-}
-
-func NewDomainsProjection() Projection {
-	return &DomainsProjection{
-		domainProjects: make(map[string]string),
-	}
-}
-
-func (p *DomainsProjection) Collection() string {
-	return CollectionDomains
-}
-
-func (p *DomainsProjection) Update(ctx context.Context, doc *firestore.DocumentSnapshot) error {
-	var data DomainDoc
+func (p *InfraProjection) Upsert(doc *firestore.DocumentSnapshot) error {
+	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
 		return err
 	}
 
-	// TODO: Active is not consistently set in the /domains collection, make sure
-	// it is for new domains and then we can use it here when streamlit is dead:
-	// if !data.Active {
-	// 	return nil
-	// }
-	// if data.Validation != "validated" {
-	// 	return nil
-	// }
+	// Skip poolbutlers
 	if data.ProjectId == "" {
-		// Treating missing projectId as "do not route"
 		return nil
 	}
 
-	// Add to projection map
-	customDomain := doc.Ref.ID
-	p.domainProjects[customDomain] = data.ProjectId
+	if err := data.validate(); err != nil {
+		return err
+	}
 
-	// l.logger.Warn(fmt.Sprintf("ADDED %s  %s", customDomain, data.ProjectId))
+	// Add to projection maps
+	serviceKey := ServiceKey{ProjectId: data.ProjectId, ServiceType: data.ServiceType}.String()
+	service := ServiceValues{Upstream: data.makeTargetUrl(), Username: data.Username}
+	p.Services.Store(serviceKey, service)
+
+	if data.CustomDomain != "" {
+		domain := DomainValues{ProjectId: data.ProjectId}
+		p.Domains.Store(data.CustomDomain, domain)
+	}
 
 	return nil
 }
 
-func (p *DomainsProjection) Swap(l *Listener) {
-	l.domainProjects.SetMap(p.domainProjects)
+func (p *InfraProjection) GetDomain(customDomain string) (DomainValues, bool) {
+	value, found := p.Domains.Load(customDomain)
+	if !found {
+		return DomainValues{}, false
+	}
+	domain, ok := value.(DomainValues)
+	return domain, ok
+}
+
+func (p *InfraProjection) GetService(projectId, serviceType string) (ServiceValues, bool) {
+	serviceKey := ServiceKey{ProjectId: projectId, ServiceType: serviceType}.String()
+	value, found := p.Services.Load(serviceKey)
+	if !found {
+		return ServiceValues{}, false
+	}
+	service, ok := value.(ServiceValues)
+	return service, ok
 }

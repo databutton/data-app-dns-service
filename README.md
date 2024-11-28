@@ -16,7 +16,9 @@ To use this module, you need the following:
 
 You can install the xcaddy tool by running the following command:
 
-    go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+```
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+```
 
 and add the $HOME/go/bin directory to your PATH environment variable.
 
@@ -33,11 +35,30 @@ To use this module, follow these steps:
 Some packages have fragile dependencies.
 In case of trouble, try to stick to versions caddy uses here:
 
-    https://github.com/caddyserver/caddy/blob/master/go.mod
+```
+https://github.com/caddyserver/caddy/blob/master/go.mod
+```
 
 What usually works is to rm go.sum, delete dependencies in go.mod and run go get with the packages to install.
 E.g. I just ran this and got things working again:
 
-    go get cloud.google.com/go/firestore@latest github.com/caddyserver/caddy/v2@latest github.com/getsentry/sentry-go@latest go.uber.org/zap@latest google.golang.org/api@latest google.golang.org/grpc@latest
+```
+go get cloud.google.com/go/firestore@latest github.com/caddyserver/caddy/v2@latest github.com/getsentry/sentry-go@latest go.uber.org/zap@latest google.golang.org/api@latest google.golang.org/grpc@latest
+```
 
 You're supposed to be able to run go get -u and/or go mod tidy and get things sorted out but it often doesn't work.
+
+## Sources
+
+pkg/ contains caddy-independent utility packages
+
+caddy-modules/ contains implementations of caddy module interfaces
+
+## Caddy modules
+
+- devxlistener runs a background process listening to firestore
+
+- devxmiddleware does some request processing like setting cors headers,
+  by looking at headers and joining with lookups from listener
+
+- devxupstreamer looks at data on the request and returns the upstream address for the reverse proxy

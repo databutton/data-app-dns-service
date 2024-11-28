@@ -2,8 +2,6 @@ package devxupstreamer
 
 import (
 	"net/http"
-	"strconv"
-	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -29,8 +27,10 @@ func init() {
 // CaddyModule returns the Caddy module information.
 func (DevxUpstreamsModule) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.reverse_proxy.upstreams.devx",
-		New: func() caddy.Module { return new(DevxUpstreamsModule) },
+		ID: "http.reverse_proxy.upstreams.devx",
+		New: func() caddy.Module {
+			return new(DevxUpstreamsModule)
+		},
 	}
 }
 
@@ -96,22 +96,22 @@ func upstreamMissingError(data devxmiddleware.DevxRequestData) error {
 	}
 }
 
-func dumpUpstreamMissingErrorToSentry(hub *sentry.Hub, r *http.Request, err error, projectID, serviceType, customDomain string) {
-	// Add some request context for the error
-	hub.ConfigureScope(func(scope *sentry.Scope) {
-		scope.SetLevel(sentry.LevelError)
-
-		// This seems to set the url to something missing the project part in the middle
-		scope.SetRequest(r)
-
-		// TODO: This doesn't seem to be available
-		scope.SetTag("transaction_id", r.Header.Get("X-Request-ID"))
-
-		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
-		scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
-	})
-	hub.CaptureException(err)
-}
+// func dumpUpstreamMissingErrorToSentry(hub *sentry.Hub, r *http.Request, err error, projectID, serviceType, customDomain string) {
+// 	// Add some request context for the error
+// 	hub.ConfigureScope(func(scope *sentry.Scope) {
+// 		scope.SetLevel(sentry.LevelError)
+//
+// 		// This seems to set the url to something missing the project part in the middle
+// 		scope.SetRequest(r)
+//
+// 		// TODO: This doesn't seem to be available
+// 		scope.SetTag("transaction_id", r.Header.Get("X-Request-Id"))
+//
+// 		scope.SetTag("hasBearer", strconv.FormatBool(strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ")))
+// 		scope.SetTag("hasCookie", strconv.FormatBool(r.Header.Get("Cookie") != ""))
+// 	})
+// 	hub.CaptureException(err)
+// }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler
 func (m *DevxUpstreamsModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {

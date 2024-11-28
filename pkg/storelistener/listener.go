@@ -34,8 +34,9 @@ type Listener struct {
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
 
-	failureBudget         *atomic.Int64
-	restartCount          *atomic.Int64
+	failureBucket *atomic.Int64
+	restartCount  *atomic.Int64
+	// TODO: Make these use atomics:
 	lastCheckFailuresTime time.Time
 	lastRestartTime       time.Time
 
@@ -58,7 +59,7 @@ func NewFirestoreListener(ctx context.Context, logger *zap.Logger) (*Listener, e
 		firestoreClient: client,
 		logger:          logger,
 
-		failureBudget:         new(atomic.Int64),
+		failureBucket:         new(atomic.Int64),
 		restartCount:          new(atomic.Int64),
 		lastCheckFailuresTime: time.Now(),
 		lastRestartTime:       time.Now(),
@@ -117,7 +118,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 
 	// Loop until canceled
 	for ctx.Err() == nil {
-		lastRestartTime := time.Now()
+		l.lastRestartTime = time.Now()
 
 		err := l.listenToSnapshots(ctx, firstSyncDone)
 		if err != nil {
@@ -131,7 +132,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 		// If the listener has worked for some time,
 		// just reset and restart right away with no delay
 		const acceptableRestartPeriod = 5 * time.Minute
-		timeSince := time.Since(lastRestartTime)
+		timeSince := time.Since(l.lastRestartTime)
 		if timeSince > acceptableRestartPeriod {
 			restartCount = 0
 			l.logger.Error("restarting listenToSnapshots immediately")
@@ -207,7 +208,15 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 	go func() {
 		for ctx.Err() == nil {
 			err := l.checkFailures()
-			l.logger.Info("Listener health check", zap.Time("lastRestartTime", l.lastRestartTime), zap.Int64("totalChanges", totalChangeCount.Load()), zap.Int64("totalErrors", totalErrorCount.Load()), zap.Error(err))
+			l.logger.Info(
+				"Listener health check",
+				zap.Time("lastRestartTime", l.lastRestartTime),
+				zap.Int64("restartCount", l.restartCount.Load()),
+				zap.Int64("failureBucket", l.failureBucket.Load()),
+				zap.Int64("totalChanges", totalChangeCount.Load()),
+				zap.Int64("totalErrors", totalErrorCount.Load()),
+				zap.Error(err),
+			)
 			if err != nil {
 				cancel()
 				return
@@ -364,41 +373,42 @@ func (l *Listener) LookupUpProjectIdFromDomain(customDomain string) string {
 	return domain.ProjectId
 }
 
-// Parameters for failure budget tuning
+// Parameters for leaky bucket failure count tuning
+// fails if errors per second is higher than bucketLeakPerSecond
+// long enough that the bucket flows over the maxFailureBudget limit
 const (
 	maxFailureBudget           = 100
-	budgetPerSecond            = 0.1
+	bucketLeakPerSecond        = 0.1
 	minimumTimeBetweenRestarts = 30 * time.Second
 )
 
 func (l *Listener) resetFailures() {
-	l.failureBudget.Store(maxFailureBudget)
+	l.failureBucket.Store(0)
 	l.lastRestartTime = time.Now()
 }
 
 // NB! This is called from upstreams module threads!
 func (l *Listener) registerFailure() int {
 	l.logger.Info("listener: registering failure")
-	return int(l.failureBudget.Add(-1))
+	return int(l.failureBucket.Add(1))
 }
 
-// TODO: If we don't get any appbutler changes this never runs...
 func (l *Listener) checkFailures() error {
-	budget := l.failureBudget.Load()
+	sinceLastCheck := time.Since(l.lastCheckFailuresTime)
+	l.lastCheckFailuresTime = time.Now()
 
 	// Add some failure budget over time, this way we'll always tend to go back to the max,
 	// and need sustained errors over some time to actually call it failure
-	addToBudget := int64(time.Since(l.lastCheckFailuresTime).Seconds() * budgetPerSecond)
-	l.lastCheckFailuresTime = time.Now()
+	bucketLeak := int64(sinceLastCheck.Seconds() * bucketLeakPerSecond)
 
-	// Add and clamp to max
-	budget += addToBudget
-	if budget > maxFailureBudget {
-		budget = maxFailureBudget
+	// Subtract leak but clamp to zero
+	bucket := l.failureBucket.Load()
+	bucket -= bucketLeak
+	if bucket < 0 {
+		bucket = 0
 	}
-
 	// Store the new budget, ignore if it has been touched between, this is not that accurate anyway
-	l.failureBudget.Store(budget)
+	l.failureBucket.Store(bucket)
 
 	// Don't restart too rapidly
 	if time.Since(l.lastRestartTime) < minimumTimeBetweenRestarts {
@@ -406,7 +416,7 @@ func (l *Listener) checkFailures() error {
 	}
 
 	// Break circuit if we're out of failure budget
-	if budget <= 0 {
+	if bucket > maxFailureBudget {
 		return ErrCircuitBroken
 	}
 	return nil

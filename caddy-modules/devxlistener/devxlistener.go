@@ -78,6 +78,14 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 	// This will be accessed by devxmiddleware before Start runs
 	m.listener = l
 
+	if m.waitForInitialLoad == nil {
+		m.logger.Error("LISTENER: Failed!")
+		return fmt.Errorf("Module has not been provisioned")
+	}
+
+	// Block caddy startup until the listener has loaded data once
+	m.waitForInitialLoad()
+
 	return nil
 }
 
@@ -121,14 +129,6 @@ func (m *ListenerModule) startListener() (*storelistener.Listener, error) {
 // Start implements caddy.App
 func (m *ListenerModule) Start() error {
 	m.logger.Info("LISTENER: Start")
-
-	if m.waitForInitialLoad == nil {
-		m.logger.Error("LISTENER: Failed!")
-		return fmt.Errorf("Module has not been provisioned")
-	}
-
-	// Block caddy startup until the listener has loaded data once
-	m.waitForInitialLoad()
 
 	m.logger.Info("LISTENER: Start exiting")
 	return nil

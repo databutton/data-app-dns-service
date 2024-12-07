@@ -366,7 +366,13 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// Look up upstream URL
 	upstream := m.listener.LookupUpstreamHost(projectID, serviceType)
 	if upstream == "" {
-		m.logger.Warn("devxmiddleware: upstream is blank")
+		m.logger.Warn("devxmiddleware: upstream is blank",
+			zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+			zap.String("originHost", originHost),
+		)
+		w.WriteHeader(http.StatusNotFound)
+		return nil
 	}
 
 	// For testing what gets passed on by caddy to upstream

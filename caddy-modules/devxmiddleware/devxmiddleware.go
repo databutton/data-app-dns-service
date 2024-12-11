@@ -371,7 +371,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			zap.String("serviceType", serviceType),
 			zap.String("originHost", originHost),
 		)
-		w.WriteHeader(http.StatusNotFound)
+		w.WriteHeader(http.StatusBadGateway)
 		return nil
 	}
 

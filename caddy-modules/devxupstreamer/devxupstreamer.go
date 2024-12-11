@@ -58,10 +58,11 @@ func (d *DevxUpstreamsModule) GetUpstreams(r *http.Request) ([]*reverseproxy.Ups
 		return nil, ErrNoMiddlewareDataFound
 	}
 
-	// If no upstream was selected log and return error
+	// If no upstream was selected log and return error,
+	// we should never get here anymore because devxmiddleware returns early
 	if data.UpstreamHost == "" {
 		err := upstreamMissingError(data)
-		d.logger.Warn(
+		d.logger.Error(
 			"Failed to get upstream",
 			zap.String("projectID", data.ProjectID),
 			zap.String("serviceType", data.ServiceType),
@@ -71,6 +72,7 @@ func (d *DevxUpstreamsModule) GetUpstreams(r *http.Request) ([]*reverseproxy.Ups
 		return nil, err
 	}
 
+	// Always use https here
 	return []*reverseproxy.Upstream{
 		{
 			Dial: data.UpstreamHost,

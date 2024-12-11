@@ -65,16 +65,18 @@ func (data *AppbutlerDoc) validate() error {
 
 func (data *AppbutlerDoc) makeTargetUrl() string {
 	if data.OverrideURL != "" {
-		// If we need http for testing it can be adjusted here, but always return https:// in production
-		return "https://" + data.OverrideURL
-	} else if data.CloudRunServiceId != "" && data.RegionCode != "" {
+		return data.OverrideURL
+	}
+
+	if data.CloudRunServiceId != "" && data.RegionCode != "" {
 		return fmt.Sprintf(
-			"https://%s-%s-%s.a.run.app:443",
+			"%s-%s-%s.a.run.app:443",
 			data.CloudRunServiceId,
 			GCP_PROJECT_HASH,
 			data.RegionCode,
 		)
 	}
+
 	return ""
 }
 

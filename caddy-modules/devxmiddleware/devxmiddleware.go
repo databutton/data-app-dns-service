@@ -306,11 +306,15 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			// Look up username of owner of project
 			ownerUsername := m.listener.LookupUsername(projectID, serviceType)
 
-			// Only set cors if username is owner of projectID
-			if username == ownerUsername {
+			if ownerUsername == "" {
+				// No owner username associated with project
+				w.WriteHeader(http.StatusUnauthorized)
+				return nil
+			} else if username == ownerUsername {
+				// Only set cors if username is owner of projectID
 				corsOrigin = originHeader
 			} else {
-				// Attempt at accessing another project, just return 401 right away
+				// Log attempt at accessing another project
 				m.logger.Error(
 					"Attempt at accessing another users project",
 					zap.String("originHost", originHost),
@@ -332,18 +336,22 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			r.Header.Set("X-Dbtn-Proxy-Case", "beyond-customdomain")
 
 			// Get project id from domain lookup
-			originProjectID := m.listener.LookupUpProjectIdFromDomain(originHost)
+			originDomainProjectID := m.listener.LookupUpProjectIdFromDomain(originHost)
 
-			// Accept if project found for this domain and header and origin matches
-			if originProjectID == projectID {
+			if originDomainProjectID == "" {
+				// No project associated with domain
+				w.WriteHeader(http.StatusUnauthorized)
+				return nil
+			} else if originDomainProjectID == projectID {
+				// Set cors if project found for this domain and header and origin matches
 				corsOrigin = originHeader
 				customDomain = originHost
 			} else {
-				// Attempt at accessing another project, just return 401 right away
+				// Log attempt at accessing another project
 				m.logger.Error(
 					"Attempt at accessing project not associated with domain",
 					zap.String("originHost", originHost),
-					zap.String("originProjectID", originProjectID),
+					zap.String("originDomainProjectID", originDomainProjectID),
 					zap.String("projectID", projectID),
 				)
 				w.WriteHeader(http.StatusUnauthorized)

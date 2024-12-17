@@ -208,54 +208,53 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 	go func() {
 		for ctx.Err() == nil {
 			err := l.checkFailures()
-			l.logger.Info(
-				"Listener health check",
+			logArgs := []zap.Field{
 				zap.Time("lastRestartTime", l.lastRestartTime),
 				zap.Int64("restartCount", l.restartCount.Load()),
 				zap.Int64("failureBucket", l.failureBucket.Load()),
 				zap.Int64("totalChanges", totalChangeCount.Load()),
 				zap.Int64("totalErrors", totalErrorCount.Load()),
-				zap.Error(err),
-			)
+			}
 			if err != nil {
+				logArgs = append(logArgs, zap.Error(err))
+				l.logger.Error("Listener health check FAILED", logArgs...)
 				cancel()
 				return
 			}
+			l.logger.Info("Listener health check OK", logArgs...)
 			time.Sleep(10 * time.Second)
 		}
 	}()
 
-	// Until canceled
+	// Iterate over snapshots until canceled
+	snapIter := query.Snapshots(ctx)
 	for ctx.Err() == nil {
-		snapIter := query.Snapshots(ctx)
-		for ctx.Err() == nil {
-			snap, err := snapIter.Next()
-			if err != nil {
-				l.logger.Error("Snapshot iterator error", zap.Error(err))
-				return err
-			}
+		snap, err := snapIter.Next()
+		if err != nil {
+			l.logger.Error("Snapshot iterator error", zap.Error(err))
+			return err
+		}
 
-			batchChangeCount, batchErrorCount := l.processSnapshot(ctx, infra, snap)
-			totalChangeCount.Add(int64(batchChangeCount))
-			totalErrorCount.Add(int64(batchErrorCount))
+		batchChangeCount, batchErrorCount := l.processSnapshot(ctx, infra, snap)
+		totalChangeCount.Add(int64(batchChangeCount))
+		totalErrorCount.Add(int64(batchErrorCount))
 
-			// Nice to have in logs while the system is new
-			// if DEBUGGING {
-			l.logger.Info("Processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount))
-			//}
+		// Nice to have in logs while the system is new
+		// if DEBUGGING {
+		l.logger.Info("Processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount))
+		//}
 
-			if first {
-				first = false
+		if first {
+			first = false
 
-				// Swap out the infra projection after the first snapshot has completed processing
-				l.SetInfra(infra)
+			// Swap out the infra projection after the first snapshot has completed processing
+			l.SetInfra(infra)
 
-				// Notify the provisioner that we've done the first sync.
-				firstSyncDone()
-			} else {
-				if SIMULATE_FAILURE {
-					return ErrSimulatedFailure
-				}
+			// Notify the provisioner that we've done the first sync.
+			firstSyncDone()
+		} else {
+			if SIMULATE_FAILURE {
+				return ErrSimulatedFailure
 			}
 		}
 	}
@@ -417,7 +416,7 @@ func (l *Listener) checkFailures() error {
 
 	// Break circuit if we're out of failure budget
 	if bucket > maxFailureBudget {
-		return ErrCircuitBroken
+		return errors.Wrapf(ErrCircuitBroken, "Exceeded failure budget (%d > %d)", bucket, maxFailureBudget)
 	}
 	return nil
 }

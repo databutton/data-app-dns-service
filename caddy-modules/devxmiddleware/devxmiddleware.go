@@ -195,7 +195,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		originUrl, err := url.Parse(originHeader)
 		if err != nil {
 			m.logger.Error(fmt.Sprintf("Invalid origin header '%s'", originHeader))
-			w.WriteHeader(http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadGateway)
 			return nil
 		}
 		originHost = originUrl.Host
@@ -266,14 +266,14 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		}
 
 		if projectID == "" {
-			// No project specified, can't find domain, just return 404 here right away
+			// No project specified, can't find domain
 			m.logger.Error(
 				"No projectId and domain lookup failed",
 				zap.String("originHost", originHost),
 				zap.String("streamlitCustomDomain", streamlitCustomDomain),
 				zap.String("customDomain", customDomain),
 			)
-			w.WriteHeader(http.StatusBadRequest)
+			w.WriteHeader(http.StatusBadGateway)
 			return nil
 		}
 
@@ -308,7 +308,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 			if ownerUsername == "" {
 				// No owner username associated with project
-				w.WriteHeader(http.StatusUnauthorized)
+				w.WriteHeader(http.StatusBadGateway)
 				return nil
 			} else if username == ownerUsername {
 				// Only set cors if username is owner of projectID
@@ -322,7 +322,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					zap.String("username", username),
 					zap.String("projectID", projectID),
 				)
-				w.WriteHeader(http.StatusUnauthorized)
+				w.WriteHeader(http.StatusBadGateway)
 				return nil
 			}
 		} else if isDevx && strings.HasPrefix(originHost, "localhost") {
@@ -340,7 +340,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 			if originDomainProjectID == "" {
 				// No project associated with domain
-				w.WriteHeader(http.StatusUnauthorized)
+				w.WriteHeader(http.StatusBadGateway)
 				return nil
 			} else if originDomainProjectID == projectID {
 				// Set cors if project found for this domain and header and origin matches
@@ -354,7 +354,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					zap.String("originDomainProjectID", originDomainProjectID),
 					zap.String("projectID", projectID),
 				)
-				w.WriteHeader(http.StatusUnauthorized)
+				w.WriteHeader(http.StatusBadGateway)
 				return nil
 			}
 		}

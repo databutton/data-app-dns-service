@@ -34,11 +34,11 @@ type Listener struct {
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
 
-	failureBucket *atomic.Int64
-	restartCount  *atomic.Int64
-	// TODO: Make these use atomics:
-	lastCheckFailuresTime time.Time
-	lastRestartTime       time.Time
+	failureBucket         *atomic.Int64
+	failedProjects        *sync.Map
+	restartCount          *atomic.Int64
+	lastCheckFailuresTime *atomic.Int64
+	lastRestartTime       *atomic.Int64
 
 	infra      *InfraProjection
 	infraMutex sync.RWMutex
@@ -60,12 +60,16 @@ func NewFirestoreListener(ctx context.Context, logger *zap.Logger) (*Listener, e
 		logger:          logger,
 
 		failureBucket:         new(atomic.Int64),
+		failedProjects:        new(sync.Map),
 		restartCount:          new(atomic.Int64),
-		lastCheckFailuresTime: time.Now(),
-		lastRestartTime:       time.Now(),
+		lastCheckFailuresTime: new(atomic.Int64),
+		lastRestartTime:       new(atomic.Int64),
 
 		infra: NewInfraProjection(),
 	}
+
+	l.lastCheckFailuresTime.Store(time.Now().UnixMilli())
+	l.lastRestartTime.Store(time.Now().UnixMilli())
 
 	return l, nil
 }
@@ -118,7 +122,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 
 	// Loop until canceled
 	for ctx.Err() == nil {
-		l.lastRestartTime = time.Now()
+		l.lastRestartTime.Store(time.Now().UnixMilli())
 
 		err := l.listenToSnapshots(ctx, firstSyncDone)
 		if err != nil {
@@ -132,7 +136,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 		// If the listener has worked for some time,
 		// just reset and restart right away with no delay
 		const acceptableRestartPeriod = 5 * time.Minute
-		timeSince := time.Since(l.lastRestartTime)
+		timeSince := time.Since(time.UnixMilli(l.lastRestartTime.Load()))
 		if timeSince > acceptableRestartPeriod {
 			restartCount = 0
 			l.logger.Error("restarting listenToSnapshots immediately")
@@ -209,7 +213,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 		for ctx.Err() == nil {
 			err := l.checkFailures()
 			logArgs := []zap.Field{
-				zap.Time("lastRestartTime", l.lastRestartTime),
+				zap.Time("lastRestartTime", time.UnixMilli(l.lastRestartTime.Load())),
 				zap.Int64("restartCount", l.restartCount.Load()),
 				zap.Int64("failureBucket", l.failureBucket.Load()),
 				zap.Int64("totalChanges", totalChangeCount.Load()),
@@ -353,7 +357,7 @@ func (l *Listener) GetInfra() *InfraProjection {
 func (l *Listener) LookupUpstreamHost(projectID, serviceType string) string {
 	service, ok := l.GetInfra().GetService(projectID, serviceType)
 	if !ok {
-		l.registerFailure()
+		l.registerFailure(projectID)
 	}
 	return service.Upstream
 }
@@ -383,18 +387,22 @@ const (
 
 func (l *Listener) resetFailures() {
 	l.failureBucket.Store(0)
-	l.lastRestartTime = time.Now()
+	l.failedProjects = new(sync.Map) // TODO: Wrap in mutex?
+	l.lastRestartTime.Store(time.Now().UnixMilli())
 }
 
 // NB! This is called from upstreams module threads!
-func (l *Listener) registerFailure() int {
-	l.logger.Info("listener: registering failure")
-	return int(l.failureBucket.Add(1))
+func (l *Listener) registerFailure(projectID string) {
+	// Don't count the same projectID, sometimes there's a single project that just keeps failing
+	// e.g. because something external tries to hit it but the project has been hibernated or deleted
+	if _, loaded := l.failedProjects.LoadOrStore(projectID, true); !loaded {
+		l.failureBucket.Add(1)
+	}
 }
 
 func (l *Listener) checkFailures() error {
-	sinceLastCheck := time.Since(l.lastCheckFailuresTime)
-	l.lastCheckFailuresTime = time.Now()
+	sinceLastCheck := time.Since(time.UnixMilli(l.lastCheckFailuresTime.Load()))
+	l.lastCheckFailuresTime.Store(time.Now().UnixMilli())
 
 	// Add some failure budget over time, this way we'll always tend to go back to the max,
 	// and need sustained errors over some time to actually call it failure
@@ -410,7 +418,7 @@ func (l *Listener) checkFailures() error {
 	l.failureBucket.Store(bucket)
 
 	// Don't restart too rapidly
-	if time.Since(l.lastRestartTime) < minimumTimeBetweenRestarts {
+	if time.Since(time.UnixMilli(l.lastRestartTime.Load())) < minimumTimeBetweenRestarts {
 		return nil
 	}
 

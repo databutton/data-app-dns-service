@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -371,9 +372,20 @@ func (l *Listener) LookupUsername(projectID, serviceType string) string {
 
 // LookupUpProjectIdFromDomain does an optimized cache lookup to get the projectId a custom domain is associated with.
 // The rest of this Listener code is basically written to support this fast lookup.
-func (l *Listener) LookupUpProjectIdFromDomain(customDomain string) string {
-	domain, _ := l.GetInfra().GetDomain(customDomain)
-	return domain.ProjectId
+func (l *Listener) LookupUpProjectIdFromDomain(originHost string) string {
+	infra := l.GetInfra()
+
+	domain, ok := infra.GetDomain(originHost)
+	if ok {
+		return domain.ProjectId
+	}
+	if strings.HasPrefix(originHost, "www.") {
+		domain, ok = infra.GetDomain(strings.TrimPrefix(originHost, "www."))
+		if ok {
+			return domain.ProjectId
+		}
+	}
+	return ""
 }
 
 // Parameters for leaky bucket failure count tuning

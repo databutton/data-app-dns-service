@@ -30,6 +30,7 @@ type AppbutlerDoc struct {
 	CloudRunServiceId string `firestore:"cloudRunServiceId,omitempty"`
 	// ... or anywhere else
 	OverrideURL string `firestore:"overrideURL,omitempty"`
+	InternalURL string `firestore:"internalURL,omitempty"`
 
 	// Where is it deployed (no CustomDomain means username.databutton.app)
 	Username     string `firestore:"username,omitempty"`
@@ -64,10 +65,17 @@ func (data *AppbutlerDoc) validate() error {
 }
 
 func (data *AppbutlerDoc) makeTargetUrl() string {
+	// Sometimes set for testing
 	if data.OverrideURL != "" {
 		return data.OverrideURL
 	}
 
+	// The new way
+	if data.InternalURL != "" {
+		return data.InternalURL
+	}
+
+	// Legacy construction of cloud run url
 	if data.CloudRunServiceId != "" && data.RegionCode != "" {
 		return fmt.Sprintf(
 			"%s-%s-%s.a.run.app:443",

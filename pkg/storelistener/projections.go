@@ -48,6 +48,7 @@ func (data AppbutlerDoc) Fields() []string {
 		"regionCode",
 		"cloudRunServiceId",
 		"overrideURL",
+		"internalURL",
 		//
 		"username",
 		"customDomain",
@@ -58,7 +59,7 @@ func (data *AppbutlerDoc) validate() error {
 	if data.ProjectId == "" || data.ServiceType == "" {
 		return ErrMissingServiceIdentityData
 	}
-	if data.OverrideURL == "" && (data.RegionCode == "" || data.CloudRunServiceId == "") {
+	if data.InternalURL == "" && data.OverrideURL == "" && (data.RegionCode == "" || data.CloudRunServiceId == "") {
 		return ErrMissingUpstreamData
 	}
 	return nil

@@ -277,7 +277,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			return nil
 		}
 
-	} else if projectID == "8de60c46-e25f-45fe-8df7-b5dd8b7f3b4d" {
+	} else if projectID == "8de60c46-e25f-45fe-8df7-b5dd8b7f3b4d" || projectID == "f752666e-efd8-455d-b42f-6738931207e7" {
 		// TODO: Add config for allowed origins to apps, special case for now
 		// extraAllowedOrigins := m.listener.LookupExtraAllowedOrigins(projectID, serviceType)
 		extraAllowedOrigins := []string{"*"}

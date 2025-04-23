@@ -210,15 +210,24 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 
-	// Debugging logs with low overhead
-	if projectID == LOG_EXTRA_FOR_PROJECT_ID && LOG_EXTRA_FOR_PROJECT_ID != "" {
+	// Enable extra debugging logs for a specific app while keeping a minimal overhead for all other requests
+	enableExtraDebugLogs := projectID == LOG_EXTRA_FOR_PROJECT_ID && LOG_EXTRA_FOR_PROJECT_ID != "" && serviceType == "prodx"
+	if enableExtraDebugLogs {
 		m.logger.Warn("DEBUGGING: TOP OF DEVX MIDDLEWARE", zap.String("projectID", projectID),
 			zap.String("serviceType", serviceType),
 			zap.String("originalPath", originalPath),
 			zap.String("originHeader", originHeader),
 			zap.String("refererHeader", refererHeader),
 			zap.String("requestUrl", r.URL.String()),
+			zap.Bool("isDebugCase", enableExtraDebugLogs),
 		)
+		// Result from a prodx request:
+		// originHeader: "https://martinal.databutton.app"
+		// originalPath: ""
+		// projectID: "eadb6129-8fca-4866-b572-d2f9bcbc1146"
+		// refererHeader: "https://martinal.databutton.app/"
+		// requestUrl: "/app/routes/chat/tools"
+		// serviceType: "prodx"
 	}
 
 	// Validate origin _if present_
@@ -226,12 +235,21 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	if originHeader != "" {
 		originUrl, err := url.Parse(originHeader)
 		if err != nil {
-			m.logger.Error("Invalid Origin", zap.String("Origin", originHeader), zap.Error(err))
+			m.logger.Error(
+				"Invalid Origin",
+				zap.String("Origin", originHeader),
+				zap.Error(err),
+				zap.Bool("isDebugCase", enableExtraDebugLogs),
+			)
 			w.WriteHeader(http.StatusBadGateway)
 			return nil
 		}
-		if originUrl.Scheme != "https" {
-			m.logger.Error("Insecure Origin", zap.String("Origin", originHeader))
+		if originUrl.Scheme != "https" && !strings.HasPrefix(originUrl.Host, "localhost:") {
+			m.logger.Error(
+				"Insecure Origin",
+				zap.String("Origin", originHeader),
+				zap.Bool("isDebugCase", enableExtraDebugLogs),
+			)
 			w.WriteHeader(http.StatusBadGateway)
 			return nil
 		}
@@ -309,23 +327,30 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
-		} else if originHeader == "https://databutton.com" {
-			// App served from databutton.com, devx and legacy prodx cases
+		} else if isDevx && originHeader == "https://databutton.com" {
+			// Devx is served from databutton.com
 			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
 			corsOrigin = originHeader
-		} else if strings.HasSuffix(originHost, ".databutton.app") {
+		} else if !isDevx && strings.HasSuffix(originHost, ".databutton.app") {
 			// New style hosting at per-user subdomains
 			r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
-			username := strings.TrimSuffix(originHost, ".databutton.app")
+			originUsername := strings.TrimSuffix(originHost, ".databutton.app")
 
 			// Look up username of owner of project
 			ownerUsername := m.listener.LookupUsername(projectID, serviceType)
 
 			if ownerUsername == "" {
 				// No owner username associated with project
+				m.logger.Error("No owner username associated with project",
+					zap.String("projectID", projectID),
+					zap.String("serviceType", serviceType),
+					zap.String("originHost", originHost),
+					zap.String("originUsername", originUsername),
+					zap.Bool("isDebugCase", enableExtraDebugLogs),
+				)
 				w.WriteHeader(http.StatusBadGateway)
 				return nil
-			} else if username == ownerUsername {
+			} else if originUsername == ownerUsername {
 				// Only set cors if username is owner of projectID
 				corsOrigin = originHeader
 			} else {
@@ -334,8 +359,9 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					"Attempt at accessing another users project",
 					zap.String("originHost", originHost),
 					zap.String("ownerUsername", ownerUsername),
-					zap.String("username", username),
+					zap.String("username", originUsername),
 					zap.String("projectID", projectID),
+					zap.Bool("isDebugCase", enableExtraDebugLogs),
 				)
 				w.WriteHeader(http.StatusBadGateway)
 				return nil
@@ -355,6 +381,15 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 			if originDomainProjectID == "" {
 				// No project associated with domain
+				if enableExtraDebugLogs {
+					m.logger.Error(
+						"No project associated with domain",
+						zap.String("originHost", originHost),
+						zap.String("projectID", projectID),
+						zap.String("serviceType", serviceType),
+						zap.Bool("isDebugCase", enableExtraDebugLogs),
+					)
+				}
 				w.WriteHeader(http.StatusBadGateway)
 				return nil
 			} else if originDomainProjectID == projectID {
@@ -368,6 +403,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					zap.String("originHost", originHost),
 					zap.String("originDomainProjectID", originDomainProjectID),
 					zap.String("projectID", projectID),
+					zap.Bool("isDebugCase", enableExtraDebugLogs),
 				)
 				w.WriteHeader(http.StatusBadGateway)
 				return nil
@@ -393,6 +429,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			zap.String("projectID", projectID),
 			zap.String("serviceType", serviceType),
 			zap.String("originHost", originHost),
+			zap.Bool("isDebugCase", enableExtraDebugLogs),
 		)
 		w.WriteHeader(http.StatusBadGateway)
 		return nil
@@ -404,6 +441,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			"Mocking upstream",
 			zap.String("listenerUpstream", upstream),
 			zap.String("mockUpstream", m.mockUpstreamHost),
+			zap.Bool("isDebugCase", enableExtraDebugLogs),
 		)
 		upstream = m.mockUpstreamHost
 	}

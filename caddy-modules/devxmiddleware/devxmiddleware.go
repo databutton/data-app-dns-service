@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
@@ -19,6 +20,14 @@ import (
 	"github.com/databutton/data-app-dns-service/pkg/storelistener"
 	"github.com/getsentry/sentry-go"
 	"go.uber.org/zap"
+)
+
+// For debugging in prod
+const (
+	LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
+	LOG_EXTRA_FOR_USERNAME   = "martinal"
+	// LOG_EXTRA_FOR_PROJECT_ID = ""
+	// LOG_EXTRA_FOR_USERNAME   = ""
 )
 
 type LookerUper interface {
@@ -182,19 +191,47 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		})
 	}
 
-	// Origin should be e.g.
-	// https://databutton.com
-	// https://username.databutton.app
-	// https://customdomain.com
-	// but it is not always present!
+	// Origin should be one of
+	//   https://databutton.com
+	//   https://username.databutton.app
+	//   https://customdomain.com
+	// if a cross-origin request is made from a standard Databutton hosted app.
+	// It can be something else if a cross-origin request is made from an external app.
 	originHeader := r.Header.Get("Origin")
+
+	// Referer should be e.g.
+	// https://api.databutton.com/_projects/PID/dbtn/devx/ui/...restpath
+	// https://username.databutton.app/appname/...restpath
+	// https://customdomain.com/...restpath
+	refererHeader := r.Header.Get("Referer")
+
+	// Databutton app variables set by caddy from url if possible
+	originalPath := r.Header.Get("X-Original-Path")
+	projectID := r.Header.Get("X-Databutton-Project-Id")
+	serviceType := r.Header.Get("X-Databutton-Service-Type")
+
+	// Debugging logs with low overhead
+	if projectID == LOG_EXTRA_FOR_PROJECT_ID && LOG_EXTRA_FOR_PROJECT_ID != "" {
+		m.logger.Warn("DEBUGGING: TOP OF DEVX MIDDLEWARE", zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+			zap.String("originalPath", originalPath),
+			zap.String("originHeader", originHeader),
+			zap.String("refererHeader", refererHeader),
+			zap.String("requestUrl", r.URL.String()),
+		)
+	}
 
 	// Validate origin _if present_
 	var originHost string
 	if originHeader != "" {
 		originUrl, err := url.Parse(originHeader)
 		if err != nil {
-			m.logger.Error(fmt.Sprintf("Invalid origin header '%s'", originHeader))
+			m.logger.Error("Invalid Origin", zap.String("Origin", originHeader), zap.Error(err))
+			w.WriteHeader(http.StatusBadGateway)
+			return nil
+		}
+		if originUrl.Scheme != "https" {
+			m.logger.Error("Insecure Origin", zap.String("Origin", originHeader))
 			w.WriteHeader(http.StatusBadGateway)
 			return nil
 		}
@@ -204,65 +241,35 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// This will be set to originHeader in cases where cross-domain request is valid from origin
 	var corsOrigin string
 
-	// Databutton app variables set by caddy from url if possible
-	projectID := r.Header.Get("X-Databutton-Project-Id")
-	serviceType := r.Header.Get("X-Databutton-Service-Type")
 	var customDomain string
 
 	// Origin shows where app is served from:
-	// - devx streamlit       databutton.com/_projects/PID/dbtn/devx/*
-	// - devx beyond          databutton.com/_projects/PID/dbtn/devx/*
-	// - prodx streamlit /v/  databutton.com/v/*
-	// - prodx beyond /u/     databutton.com/u/*
-	// - prodx beyond         user.databutton.com|app
-	// - custom streamlit     custom.com
-	// - custom beyond        custom.com
-	//
-	// Temporary cases we need to keep working:
-	// - devx streamlit       databutton.com/_projects/PID/dbtn/devx/*   same as new
-	// - prodx streamlit /v/  databutton.com/v/*  soon deprecated
-	// - prodx beyond /u/     databutton.com/u/*  soon deprecated
-	// - custom streamlit     custom.com  has header
-	//
-	// Future cases we care about:
-	// - devx beyond          databutton.com/_projects/PID/dbtn/devx/*
-	// - prodx beyond         user.databutton.com|app
-	// - custom beyond        custom.com
+	// - devx           databutton.com            /_projects/{projectID}/dbtn/devx/ui/
+	// - prodx          username.databutton.app   /appname/
+	// - custom         custom.com                /
+
+	// FIXME: Make the non-_projects cases work
+	// API may be called on URL:
+	// - appx             databutton.com            /_projects/{projectID}/dbtn/{serviceType}/
+	// - appx             api.databutton.com        /_projects/{projectID}/dbtn/{serviceType}/
+	// - databutton.app   username.databutton.app   /appname/api/* -> /_projects/{projectID}/dbtn/{serviceType}/app/routes/*
+	// - custom           custom.com                /api/* -> /_projects/{projectID}/dbtn/{serviceType}/app/routes/*
 
 	if projectID == "" {
-		// This means the URL is not _projects/... and is currently only happening for
-		// streamlit apps on custom domains because then all of prodx is behind the domain.
-
-		// Deprecated: Streamlit custom domain apps have this header set in cloudfront
-		streamlitCustomDomain := r.Header.Get("X-Dbtn-Baseurl")
-		if streamlitCustomDomain != "" && serviceType == "prodx" {
-			r.Header.Set("X-Dbtn-Proxy-Case", "streamlit-customdomain")
-
-			// This will happen
-			// if streamlitCustomDomain != originHost {
-			// 	m.logger.Warn("Origin and X-Dbtn-BaseUrl differs",
-			// 		zap.String("OriginHost", originHost),
-			// 		zap.String("DbtnBaseUrl", streamlitCustomDomain),
-			// 	)
-			// }
-
-			// Get project id from domain lookup
-			projectID = m.listener.LookupUpProjectIdFromDomain(streamlitCustomDomain)
-
-			// Accept if project found for this domain and header and origin matches
-			if projectID != "" {
-				corsOrigin = originHeader
-				customDomain = streamlitCustomDomain
-				r.Header.Set("X-Databutton-Project-Id", projectID)
-
-				// Emulate what we already do for regular prodx deploys in caddy
-				// NB! This is for streamlit custom domains, where r.URL.Path
-				// will not include the /_projects/.../prodx part
-				r.Header.Set(
-					"X-Original-Path",
-					makeOriginalPath(projectID, serviceType, r.URL.Path),
-				)
-			}
+		// This means the URL is not _projects/...
+		// Get project id from domain lookup
+		if strings.HasSuffix(originHost, ".databutton.app") {
+			// FIXME: Case: username.databutton.app/appname/api/...
+			// originHost = username.databutton.app
+			// appnameHeader := r.Header.Get("X-Databutton-Appname")
+			// projectID = m.listener.LookupUpProjectIdForDatabuttonAppDomain(
+			// 	strings.TrimSuffix(originHost, ".databutton.app"),
+			// 	appnameHeader,
+			// )
+		} else {
+			// FIXME: Case: custom.com/api/...
+			// originHost = custom.com
+			projectID = m.listener.LookupUpProjectIdFromDomain(originHost)
 		}
 
 		if projectID == "" {
@@ -270,12 +277,20 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			m.logger.Error(
 				"No projectId and domain lookup failed",
 				zap.String("originHost", originHost),
-				zap.String("streamlitCustomDomain", streamlitCustomDomain),
-				zap.String("customDomain", customDomain),
 			)
 			w.WriteHeader(http.StatusBadGateway)
 			return nil
 		}
+
+		// Accept if project found for this domain and header and origin matches
+		corsOrigin = originHeader
+		r.Header.Set("X-Databutton-Project-Id", projectID)
+
+		// Emulate what we already do in caddy for regular /_projects/.../prodx requests
+		r.Header.Set(
+			"X-Original-Path",
+			makeOriginalPath(projectID, serviceType, r.URL.Path),
+		)
 
 	} else if projectID == "8de60c46-e25f-45fe-8df7-b5dd8b7f3b4d" || projectID == "f752666e-efd8-455d-b42f-6738931207e7" {
 		// TODO: Add config for allowed origins to apps, special case for now
@@ -415,7 +430,8 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 const (
 	ALLOWED_METHODS = "POST, GET, PATCH, PUT, OPTIONS, DELETE"
-	ALLOWED_HEADERS = "Content-Type, Authorization, X-Authorization, X-Dbtn-Authorization, X-Dbtn-Baseurl, X-Dbtn-Webapp-Version, X-Request-Id"
+	ALLOWED_HEADERS = "Content-Type, Authorization, X-Authorization, X-Dbtn-Authorization, X-Dbtn-Webapp-Version, X-Request-Id"
+	// STAINLESS_HEADERS = "X-Stainless-Arch, X-Stainless-Lang, X-Stainless-Os, X-Stainless-Package-Version, X-Stainless-Runtime, X-Stainless-Runtime-Version"
 )
 
 func setCorsHeaders(w http.ResponseWriter, origin string) {
@@ -423,16 +439,9 @@ func setCorsHeaders(w http.ResponseWriter, origin string) {
 	header.Set("Access-Control-Allow-Origin", origin)
 	header.Set("Access-Control-Allow-Methods", ALLOWED_METHODS)
 	header.Set("Access-Control-Allow-Headers", ALLOWED_HEADERS)
-	// TODO: "false" to disallow sending cookies in some cases?
 	header.Set("Access-Control-Allow-Credentials", "true")
 
-	foundVary := false
-	for _, v := range header.Values("Vary") {
-		if v == "Origin" {
-			foundVary = true
-			break
-		}
-	}
+	foundVary := slices.Contains(header.Values("Vary"), "Origin")
 	if !foundVary {
 		header.Add("Vary", "Origin")
 	}

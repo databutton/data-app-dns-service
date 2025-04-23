@@ -379,12 +379,14 @@ func (l *Listener) LookupUpProjectIdFromDomain(originHost string) string {
 	if ok {
 		return domain.ProjectId
 	}
+
 	if strings.HasPrefix(originHost, "www.") {
 		domain, ok = infra.GetDomain(strings.TrimPrefix(originHost, "www."))
 		if ok {
 			return domain.ProjectId
 		}
 	}
+
 	return ""
 }
 

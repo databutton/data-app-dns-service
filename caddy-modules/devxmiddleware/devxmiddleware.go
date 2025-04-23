@@ -244,7 +244,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			w.WriteHeader(http.StatusBadGateway)
 			return nil
 		}
-		if originUrl.Scheme != "https" && !strings.HasPrefix(originUrl.Host, "localhost:") {
+		if originUrl.Scheme != "https" && !strings.HasPrefix(originUrl.Host, "localhost") {
 			m.logger.Error(
 				"Insecure Origin",
 				zap.String("Origin", originHeader),

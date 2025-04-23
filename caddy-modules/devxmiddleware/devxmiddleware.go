@@ -327,7 +327,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
-		} else if isDevx && originHeader == "https://databutton.com" {
+		} else if originHeader == "https://databutton.com" { // isDevx &&
 			// Devx is served from databutton.com
 			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
 			corsOrigin = originHeader

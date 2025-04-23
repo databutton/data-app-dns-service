@@ -22,12 +22,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// For debugging in prod
+// Set a project id here for extra debugging logs in prod for just this one app
 const (
-	LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
-	LOG_EXTRA_FOR_USERNAME   = "martinal"
-	// LOG_EXTRA_FOR_PROJECT_ID = ""
-	// LOG_EXTRA_FOR_USERNAME   = ""
+	// LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
+	LOG_EXTRA_FOR_PROJECT_ID = ""
 )
 
 type LookerUper interface {
@@ -151,9 +149,7 @@ func makeOriginalPath(projectID, serviceType, path string) string {
 	if strings.HasPrefix(path, "/_projects") {
 		return path
 	}
-	// NB! This is for streamlit custom domains, where r.URL.Path
-	// will not include the /_projects/.../prodx part, but may be
-	// suitable in the future as well if we do API calls via custom domains
+	// Path is on the form /app/routes/<endpointpath>
 	return fmt.Sprintf("/_projects/%s/dbtn/%s%s", projectID, serviceType, path)
 }
 
@@ -206,7 +202,6 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	refererHeader := r.Header.Get("Referer")
 
 	// Databutton app variables set by caddy from url if possible
-	originalPath := r.Header.Get("X-Original-Path")
 	projectID := r.Header.Get("X-Databutton-Project-Id")
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 
@@ -215,15 +210,13 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	if enableExtraDebugLogs {
 		m.logger.Warn("DEBUGGING: TOP OF DEVX MIDDLEWARE", zap.String("projectID", projectID),
 			zap.String("serviceType", serviceType),
-			zap.String("originalPath", originalPath),
 			zap.String("originHeader", originHeader),
 			zap.String("refererHeader", refererHeader),
 			zap.String("requestUrl", r.URL.String()),
 			zap.Bool("isDebugCase", enableExtraDebugLogs),
 		)
-		// Result from a prodx request:
+		// Example result from a prodx request:
 		// originHeader: "https://martinal.databutton.app"
-		// originalPath: ""
 		// projectID: "eadb6129-8fca-4866-b572-d2f9bcbc1146"
 		// refererHeader: "https://martinal.databutton.app/"
 		// requestUrl: "/app/routes/chat/tools"

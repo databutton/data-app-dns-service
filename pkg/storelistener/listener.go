@@ -111,6 +111,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 	l.logger.Info("firestorelistener.retryForever")
 
 	hub := sentry.GetHubFromContext(ctx)
+	hub.CaptureMessage("about to enter listenToSnapshots loop, logging sentry event to confirm it gets through")
 	defer func() {
 		l.logger.Error("firestorelistener.retryForever exiting")
 		hub.CaptureMessage("listenToSnapshots returning, canceled or panic")

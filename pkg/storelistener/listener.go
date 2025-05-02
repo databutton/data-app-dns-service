@@ -111,10 +111,10 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 	l.logger.Info("firestorelistener.retryForever")
 
 	hub := sentry.GetHubFromContext(ctx)
-	hub.CaptureMessage("about to enter listenToSnapshots loop, logging sentry event to confirm it gets through")
+	hub.CaptureMessage("about to enter listenToSnapshots loop, logging sentry event to confirm it gets through") // OBSERVED
 	defer func() {
-		l.logger.Error("firestorelistener.retryForever exiting")
-		hub.CaptureMessage("listenToSnapshots returning, canceled or panic")
+		l.logger.Error("firestorelistener.retryForever exiting")             // NOT OBSERVED
+		hub.CaptureMessage("listenToSnapshots returning, canceled or panic") // NOT OBSERVED
 		sentry.Flush(2 * time.Second)
 	}()
 
@@ -128,11 +128,11 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 
 		err := l.listenToSnapshots(ctx, firstSyncDone)
 		if err != nil {
-			l.logger.Error("listenToSnapshots returned error", zap.Error(err))
-			hub.CaptureException(errors.Wrap(err, "listenToSnapshots returned error"))
+			l.logger.Error("listenToSnapshots returned error", zap.Error(err))         // NOT OBSERVED
+			hub.CaptureException(errors.Wrap(err, "listenToSnapshots returned error")) // NOT OBSERVED
 		} else {
-			l.logger.Error("listenToSnapshots returned without error")
-			hub.CaptureMessage("listenToSnapshots returned without error")
+			l.logger.Error("listenToSnapshots returned without error")     // NOT OBSERVED
+			hub.CaptureMessage("listenToSnapshots returned without error") // NOT OBSERVED
 		}
 
 		// If the listener has worked for some time,
@@ -141,8 +141,8 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 		timeSince := time.Since(time.UnixMilli(l.lastRestartTime.Load()))
 		if timeSince > acceptableRestartPeriod {
 			restartCount = 0
-			l.logger.Error("restarting listenToSnapshots immediately")
-			hub.CaptureMessage("restarting listenToSnapshots immediately")
+			l.logger.Error("restarting listenToSnapshots immediately")     // NOT OBSERVED
+			hub.CaptureMessage("restarting listenToSnapshots immediately") // NOT OBSERVED
 			continue
 		}
 
@@ -153,7 +153,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 			// Not expecting this to happen a lot so we should ideally never get here,
 			// but if firestore connections are rotten or something then a forceful
 			// full service restart may be better
-			hub.CaptureException(ErrSnapshotListenerFailed)
+			hub.CaptureException(ErrSnapshotListenerFailed) // NOT OBSERVED
 			l.DieNow()
 		}
 
@@ -166,7 +166,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 // Note: If this panics we want it to blow up the service.
 // Note: If this returns error we want it to be called again.
 func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) error {
-	l.logger.Info("firestorelistener.listenToSnapshots")
+	l.logger.Info("firestorelistener.listenToSnapshots") // OBSERVED
 
 	collection := CollectionAppbutlers
 
@@ -223,11 +223,11 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 			}
 			if err != nil {
 				logArgs = append(logArgs, zap.Error(err))
-				l.logger.Error("Listener health check FAILED", logArgs...)
+				l.logger.Error("firestorelistener.listenToSnapshots listener health check FAILED", logArgs...) // NOT OBSERVED
 				cancel()
 				return
 			}
-			l.logger.Info("Listener health check OK", logArgs...)
+			l.logger.Info("firestorelistener.listenToSnapshots listener health check OK", logArgs...) // OBSERVED
 			time.Sleep(10 * time.Second)
 		}
 	}()
@@ -237,7 +237,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 	for ctx.Err() == nil {
 		snap, err := snapIter.Next()
 		if err != nil {
-			l.logger.Error("Snapshot iterator error", zap.Error(err))
+			l.logger.Error("firestorelistener.listenToSnapshots snapshot iterator error", zap.Error(err)) // NOT OBSERVED
 			return err
 		}
 
@@ -247,7 +247,7 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 
 		// Nice to have in logs while the system is new
 		// if DEBUGGING {
-		l.logger.Info("Processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount))
+		l.logger.Info("firestorelistener.listenToSnapshots processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount)) // OBSERVED
 		//}
 
 		if first {
@@ -356,10 +356,10 @@ func (l *Listener) GetInfra() *InfraProjection {
 
 // LookupUpstreamHost does an optimized cache lookup to get the upstream url.
 // The rest of this Listener code is basically written to support this fast lookup.
-func (l *Listener) LookupUpstreamHost(projectID, serviceType string) string {
+func (l *Listener) LookupUpstreamHost(ctx context.Context, projectID, serviceType string) string {
 	service, ok := l.GetInfra().GetService(projectID, serviceType)
-	if !ok {
-		l.registerFailure(projectID)
+	if !ok || service.Upstream == "" {
+		l.registerFailure(ctx, projectID)
 	}
 	return service.Upstream
 }
@@ -395,9 +395,9 @@ func (l *Listener) LookupUpProjectIdFromDomain(originHost string) string {
 // fails if errors per second is higher than bucketLeakPerSecond
 // long enough that the bucket flows over the maxFailureBudget limit
 const (
-	maxFailureBudget           = 100
+	maxFailureBudget           = 5
 	bucketLeakPerSecond        = 0.1
-	minimumTimeBetweenRestarts = 30 * time.Second
+	minimumTimeBetweenRestarts = 3 * time.Minute
 )
 
 func (l *Listener) resetFailures() {
@@ -407,11 +407,21 @@ func (l *Listener) resetFailures() {
 }
 
 // NB! This is called from upstreams module threads!
-func (l *Listener) registerFailure(projectID string) {
+func (l *Listener) registerFailure(ctx context.Context, projectID string) {
 	// Don't count the same projectID, sometimes there's a single project that just keeps failing
 	// e.g. because something external tries to hit it but the project has been hibernated or deleted
 	if _, loaded := l.failedProjects.LoadOrStore(projectID, true); !loaded {
 		l.failureBucket.Add(1)
+
+		// Log failure (happens only once per projectID)
+		hub := sentry.GetHubFromContext(ctx)
+		if hub != nil {
+			hub.WithScope(func(scope *sentry.Scope) {
+				scope.SetTag("projectID", projectID)
+				scope.SetLevel(sentry.LevelWarning)
+				hub.CaptureMessage("Upstream lookup failure registered")
+			})
+		}
 	}
 }
 

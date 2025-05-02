@@ -30,7 +30,7 @@ const (
 
 type LookerUper interface {
 	LookupUpProjectIdFromDomain(domain string) string
-	LookupUpstreamHost(projectID, serviceType string) string
+	LookupUpstreamHost(ctx context.Context, projectID, serviceType string) string
 	LookupUsername(projectID, serviceType string) string
 }
 
@@ -416,7 +416,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Look up upstream URL
-	upstream := m.listener.LookupUpstreamHost(projectID, serviceType)
+	upstream := m.listener.LookupUpstreamHost(ctx, projectID, serviceType)
 	if upstream == "" {
 		m.logger.Warn("devxmiddleware: upstream is blank",
 			zap.String("projectID", projectID),

@@ -51,7 +51,7 @@ func (m *ListenerModule) CaddyModule() caddy.ModuleInfo {
 // Provision is the caddy module entrypoint
 func (m *ListenerModule) Provision(ctx caddy.Context) error {
 	// Logger associated with this caddy module
-	m.logger = ctx.Logger()
+	m.logger = ctx.Logger().With(zap.String("module", "devxlistener"))
 	m.logger.Info("devxlistener: Provision")
 
 	// Store a context that is cancelled when the module cleans up

@@ -359,7 +359,7 @@ func (l *Listener) GetInfra() *InfraProjection {
 func (l *Listener) LookupUpstreamHost(ctx context.Context, projectID, serviceType string) string {
 	service, ok := l.GetInfra().GetService(projectID, serviceType)
 	if !ok || service.Upstream == "" {
-		l.registerFailure(ctx, projectID)
+		l.registerFailure(ctx, projectID, serviceType)
 	}
 	return service.Upstream
 }
@@ -407,14 +407,15 @@ func (l *Listener) resetFailures() {
 }
 
 // NB! This is called from upstreams module threads!
-func (l *Listener) registerFailure(ctx context.Context, projectID string) {
-	// Don't count the same projectID, sometimes there's a single project that just keeps failing
+func (l *Listener) registerFailure(ctx context.Context, projectID string, serviceType string) {
+	// Don't count the same serviceType+projectID, sometimes there's a single project that just keeps failing
 	// e.g. because something external tries to hit it but the project has been hibernated or deleted
-	if _, loaded := l.failedProjects.LoadOrStore(projectID, true); !loaded {
+	if _, loaded := l.failedProjects.LoadOrStore(serviceType+projectID, true); !loaded {
 		l.failureBucket.Add(1)
 
 		// Log failure (happens only once per projectID)
 		hub := sentry.GetHubFromContext(ctx)
+		l.logger.Warn("Upstream lookup failure registered", zap.String("projectID", projectID), zap.String("serviceType", serviceType), zap.Bool("alsoInSentry", hub != nil))
 		if hub != nil {
 			hub.WithScope(func(scope *sentry.Scope) {
 				scope.SetTag("projectID", projectID)

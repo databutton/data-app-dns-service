@@ -180,12 +180,13 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// TODO: Maybe add zap and sentry middleware to entire caddy stack and not just devx parts
 	// Clone a sentry hub for this request
 	var hub *sentry.Hub
-	if m.debug {
-		hub = sentry.CurrentHub().Clone()
-		hub.ConfigureScope(func(scope *sentry.Scope) {
-			scope.SetRequest(r)
-		})
-	}
+	// if m.debug {
+	hub = sentry.CurrentHub().Clone()
+	hub.ConfigureScope(func(scope *sentry.Scope) {
+		scope.SetRequest(r)
+	})
+	ctx = sentry.SetHubOnContext(ctx, hub)
+	//}
 
 	// Origin should be one of
 	//   https://databutton.com

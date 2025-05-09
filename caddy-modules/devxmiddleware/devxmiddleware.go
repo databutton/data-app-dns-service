@@ -25,7 +25,8 @@ import (
 // Set a project id here for extra debugging logs in prod for just this one app
 const (
 	// LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
-	LOG_EXTRA_FOR_PROJECT_ID = ""
+	// LOG_EXTRA_FOR_PROJECT_ID = ""
+	LOG_EXTRA_FOR_PROJECT_ID = "2d4694f7-7dd8-4448-8fa0-7dd0c71dd4cc"
 )
 
 type LookerUper interface {

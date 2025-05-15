@@ -29,6 +29,8 @@ const (
 	LOG_EXTRA_FOR_PROJECT_ID = ""
 )
 
+var EnableExtraDebugLogsForAllRequests = os.Getenv("ENABLE_EXTRA_DEBUG_LOGS_FOR_ALL_REQUESTS") == "true"
+
 type LookerUper interface {
 	LookupUpProjectIdFromDomain(domain string) string
 	LookupUpstreamHost(ctx context.Context, projectID, serviceType string) string
@@ -182,6 +184,7 @@ type InfraResponse struct {
 
 func (m *DevxMiddlewareModule) writeErrorResponse(w http.ResponseWriter, status int, message string, context map[string]string) error {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	err := json.NewEncoder(w).Encode(InfraResponse{
 		Source:  "databutton-proxy",
 		Message: message,
@@ -190,7 +193,6 @@ func (m *DevxMiddlewareModule) writeErrorResponse(w http.ResponseWriter, status 
 	if err != nil {
 		m.logger.Error("Failed to write error response", zap.Error(err))
 	}
-	w.WriteHeader(status)
 	return nil
 }
 
@@ -228,7 +230,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	serviceType := r.Header.Get("X-Databutton-Service-Type")
 
 	// Enable extra debugging logs for a specific app while keeping a minimal overhead for all other requests
-	enableExtraDebugLogs := projectID == LOG_EXTRA_FOR_PROJECT_ID && LOG_EXTRA_FOR_PROJECT_ID != "" && serviceType == "prodx"
+	enableExtraDebugLogs := (projectID == LOG_EXTRA_FOR_PROJECT_ID && LOG_EXTRA_FOR_PROJECT_ID != "") || EnableExtraDebugLogsForAllRequests
 	if enableExtraDebugLogs {
 		m.logger.Warn("DEBUGGING: TOP OF DEVX MIDDLEWARE", zap.String("projectID", projectID),
 			zap.String("serviceType", serviceType),

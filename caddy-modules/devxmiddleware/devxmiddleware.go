@@ -5,6 +5,7 @@ package devxmiddleware
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -173,6 +174,26 @@ func (m *DevxMiddlewareModule) DebugDumpServices() {
 	fmt.Printf("/////// END DEBUGGING SERVICES DUMP\n")
 }
 
+type InfraResponse struct {
+	Source  string            `json:"source"`
+	Message string            `json:"message"`
+	Context map[string]string `json:"context,omitempty"`
+}
+
+func (m *DevxMiddlewareModule) writeErrorResponse(w http.ResponseWriter, status int, message string, context map[string]string) error {
+	w.Header().Set("Content-Type", "application/json")
+	err := json.NewEncoder(w).Encode(InfraResponse{
+		Source:  "databutton-proxy",
+		Message: message,
+		Context: context,
+	})
+	if err != nil {
+		m.logger.Error("Failed to write error response", zap.Error(err))
+	}
+	w.WriteHeader(status)
+	return nil
+}
+
 // ServeHTTP implements caddyhttp.MiddlewareHandler
 func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request, h caddyhttp.Handler) error {
 	ctx := r.Context()
@@ -235,17 +256,24 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				zap.Error(err),
 				zap.Bool("isDebugCase", enableExtraDebugLogs),
 			)
-			w.WriteHeader(http.StatusBadGateway)
-			return nil
+			return m.writeErrorResponse(w, http.StatusBadRequest, "Invalid Origin header", map[string]string{
+				"Origin":      originHeader,
+				"ProjectID":   projectID,
+				"ServiceType": serviceType,
+			})
 		}
+		// TODO: This exception is not really safe, localhost shouldn't be allowed, see comment below on localhost and vite
 		if originUrl.Scheme != "https" && !strings.HasPrefix(originUrl.Host, "localhost") {
 			m.logger.Error(
 				"Insecure Origin",
 				zap.String("Origin", originHeader),
 				zap.Bool("isDebugCase", enableExtraDebugLogs),
 			)
-			w.WriteHeader(http.StatusBadGateway)
-			return nil
+			return m.writeErrorResponse(w, http.StatusBadRequest, "Insecure Origin header", map[string]string{
+				"Origin":      originHeader,
+				"ProjectID":   projectID,
+				"ServiceType": serviceType,
+			})
 		}
 		originHost = originUrl.Host
 	}
@@ -290,8 +318,9 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				"No projectId and domain lookup failed",
 				zap.String("originHost", originHost),
 			)
-			w.WriteHeader(http.StatusBadGateway)
-			return nil
+			return m.writeErrorResponse(w, http.StatusBadGateway, "No projectId to identify the app in URL, and domain lookup failed", map[string]string{
+				"Origin": originHeader,
+			})
 		}
 
 		// Accept if project found for this domain and header and origin matches
@@ -316,49 +345,48 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				break
 			}
 		}
+
 	} else {
 		isDevx := serviceType == "devx"
+		isProdx := serviceType == "prodx"
+
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
 		} else if originHeader == "https://databutton.com" { // isDevx &&
+			// TODO: Shouldn't prodx be disallowed here?
+			//       There was a reason for disabling the
+			//       isDevx check here but don't remember why!
+			//
 			// Devx is served from databutton.com
 			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
 			corsOrigin = originHeader
-		} else if !isDevx && strings.HasSuffix(originHost, ".databutton.app") {
+		} else if isProdx && strings.HasSuffix(originHost, ".databutton.app") {
 			// New style hosting at per-user subdomains
 			r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
+
+			// Compare origin url username to app owner username
 			originUsername := strings.TrimSuffix(originHost, ".databutton.app")
-
-			// Look up username of owner of project
 			ownerUsername := m.listener.LookupUsername(projectID, serviceType)
-
-			if ownerUsername == "" {
-				// No owner username associated with project
-				m.logger.Error("No owner username associated with project",
+			if originUsername == ownerUsername {
+				// Only set cors if username is owner of projectID
+				corsOrigin = originHeader
+			} else {
+				msg := "The app being called is not owned by the username in the domain it's being called from"
+				m.logger.Error(msg,
 					zap.String("projectID", projectID),
 					zap.String("serviceType", serviceType),
 					zap.String("originHost", originHost),
 					zap.String("originUsername", originUsername),
 					zap.Bool("isDebugCase", enableExtraDebugLogs),
 				)
-				w.WriteHeader(http.StatusBadGateway)
-				return nil
-			} else if originUsername == ownerUsername {
-				// Only set cors if username is owner of projectID
-				corsOrigin = originHeader
-			} else {
-				// Log attempt at accessing another project
-				m.logger.Error(
-					"Attempt at accessing another users project",
-					zap.String("originHost", originHost),
-					zap.String("ownerUsername", ownerUsername),
-					zap.String("username", originUsername),
-					zap.String("projectID", projectID),
-					zap.Bool("isDebugCase", enableExtraDebugLogs),
-				)
-				w.WriteHeader(http.StatusBadGateway)
-				return nil
+				if r.Method == "OPTIONS" {
+					return m.writeErrorResponse(w, http.StatusBadGateway, msg, map[string]string{
+						"Origin":      originHeader,
+						"ProjectID":   projectID,
+						"ServiceType": serviceType,
+					})
+				}
 			}
 		} else if isDevx && strings.HasPrefix(originHost, "localhost") {
 			// Call comes from localhost, i.e. running webapp locally
@@ -370,37 +398,31 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			// Call comes from outside our infra
 			r.Header.Set("X-Dbtn-Proxy-Case", "beyond-customdomain")
 
-			// Get project id from domain lookup
+			// Get project id from domain lookup (for cors check only!)
 			originDomainProjectID := m.listener.LookupUpProjectIdFromDomain(originHost)
-
-			if originDomainProjectID == "" {
-				// No project associated with domain
+			if originDomainProjectID == projectID {
+				// Set cors if project found for this domain and header and origin matches
+				corsOrigin = originHeader
+				customDomain = originHost
+			} else {
+				// Don't set cors if different or no project found for this domain
+				msg := "Origin domain is not associated with the app being called"
 				if enableExtraDebugLogs {
 					m.logger.Error(
-						"No project associated with domain",
+						msg,
 						zap.String("originHost", originHost),
 						zap.String("projectID", projectID),
 						zap.String("serviceType", serviceType),
 						zap.Bool("isDebugCase", enableExtraDebugLogs),
 					)
 				}
-				w.WriteHeader(http.StatusBadGateway)
-				return nil
-			} else if originDomainProjectID == projectID {
-				// Set cors if project found for this domain and header and origin matches
-				corsOrigin = originHeader
-				customDomain = originHost
-			} else {
-				// Log attempt at accessing another project
-				m.logger.Error(
-					"Attempt at accessing project not associated with domain",
-					zap.String("originHost", originHost),
-					zap.String("originDomainProjectID", originDomainProjectID),
-					zap.String("projectID", projectID),
-					zap.Bool("isDebugCase", enableExtraDebugLogs),
-				)
-				w.WriteHeader(http.StatusBadGateway)
-				return nil
+				if r.Method == "OPTIONS" {
+					return m.writeErrorResponse(w, http.StatusNoContent, msg, map[string]string{
+						"Origin":      originHeader,
+						"ProjectID":   projectID,
+						"ServiceType": serviceType,
+					})
+				}
 			}
 		}
 	}
@@ -412,6 +434,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 	// Short-circuit options requests
 	if r.Method == "OPTIONS" {
+		// Cases that get here should be regular no-cors-needed requests so not returning any message
 		w.WriteHeader(http.StatusNoContent)
 		return nil
 	}
@@ -425,8 +448,11 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			zap.String("originHost", originHost),
 			zap.Bool("isDebugCase", enableExtraDebugLogs),
 		)
-		w.WriteHeader(http.StatusBadGateway)
-		return nil
+		return m.writeErrorResponse(w, http.StatusBadGateway, "Found no backend service registered for this app", map[string]string{
+			"Origin":      originHeader,
+			"ProjectID":   projectID,
+			"ServiceType": serviceType,
+		})
 	}
 
 	// For testing what gets passed on by caddy to upstream

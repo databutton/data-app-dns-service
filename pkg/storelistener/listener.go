@@ -258,7 +258,7 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 			RoutingChangedAt time.Time `firestore:"routingChangedAt"`
 		}
 		var appbutlerCursorDoc AppbutlerCursorDoc
-		if err := last.DataTo(&appbutlerCursorDoc); err != nil || appbutlerCursorDoc.RoutingChangedAt.IsZero() {
+		if err := last.DataTo(&appbutlerCursorDoc); err != nil {
 			// Shouldn't happen, we need to look at the doc here
 			hub := sentry.GetHubFromContext(ctx)
 			hub.WithScope(func(scope *sentry.Scope) {
@@ -274,6 +274,10 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 			// Can't continue here
 			return err
 		}
+		if appbutlerCursorDoc.RoutingChangedAt.IsZero() {
+			return errors.Errorf("RoutingChangedAt is zero, this should never happen")
+		}
+
 		// Store cursor for next poll batch
 		cursor = cursorType{appbutlerCursorDoc.RoutingChangedAt, last.Ref.ID}
 

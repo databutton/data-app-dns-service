@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/AlekSi/pointer"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/getsentry/sentry-go"
 	"github.com/pkg/errors"
@@ -122,11 +121,19 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 	// - If restarts > 5, die to restart service
 	restartCount := 0
 
+	const usePolling = true // FIXME: Use this always after testing and clean up code
+
 	// Loop until canceled
 	for ctx.Err() == nil {
 		l.lastRestartTime.Store(time.Now().UnixMilli())
 
-		err := l.listenToSnapshots(ctx, firstSyncDone)
+		var err error
+		if usePolling {
+			err = l.listenByPolling(ctx, firstSyncDone)
+		} else {
+			err = l.listenToSnapshots(ctx, firstSyncDone)
+		}
+
 		if err != nil {
 			l.logger.Error("listenToSnapshots returned error", zap.Error(err))         // NOT OBSERVED
 			hub.CaptureException(errors.Wrap(err, "listenToSnapshots returned error")) // NOT OBSERVED
@@ -161,6 +168,124 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 		l.logger.Warn("firestorelistener.retryForever sleeping before next listenToSnapshots attempt", zap.Int("restartCount", restartCount))
 		time.Sleep(time.Second)
 	}
+}
+
+func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) error {
+	l.logger.Info("firestorelistener.listenByPolling")
+
+	collectionName := CollectionAppbutlers
+	collection := l.firestoreClient.Collection(collectionName)
+	if collection == nil {
+		panic(errors.Errorf("Collection %s not found", collectionName))
+	}
+
+	// Page tracking
+	const pageSize = 1000
+	const sleepDuration = 3 * time.Second
+	startTime := time.Now()
+	type cursorType struct {
+		ts time.Time
+		id string
+	}
+	var cursor cursorType
+
+	// Create a fresh blank infra projection to populate
+	infra := NewInfraProjection()
+	first := true
+
+	// FIXME: run health check goroutine or just skip it and simplify?
+
+	// Poll until canceled
+	for ctx.Err() == nil {
+		query := collection.
+			// Select(AppbutlerDoc{}.Fields()...).
+			OrderBy(AppbutlerCursorTimestampField, firestore.Asc).
+			OrderBy(firestore.DocumentID, firestore.Asc)
+		if cursor != (cursorType{}) {
+			query = query.StartAfter(cursor.ts, cursor.id)
+		}
+		docs, err := query.
+			Limit(pageSize).
+			Documents(ctx).
+			GetAll()
+		if err != nil {
+			l.logger.Error("firestorelistener.listenByPolling documents getall error", zap.Error(err))
+			return err
+		}
+
+		if SIMULATE_FAILURE {
+			return ErrSimulatedFailure
+		}
+
+		if first && (len(docs) < pageSize || startTime.Before(docs[len(docs)-1].UpdateTime)) {
+			l.logger.Info("firestorelistener.listenByPolling all docs fetched once")
+			first = false
+
+			// Swap out the infra projection after the first snapshot has completed processing
+			l.SetInfra(infra)
+
+			firstSyncDone()
+		}
+
+		if len(docs) == 0 {
+			l.logger.Info("firestorelistener.listenByPolling no docs found")
+			time.Sleep(sleepDuration)
+			continue
+		}
+
+		// Process docs and update infra
+		for _, doc := range docs {
+			err := infra.UpsertPolled(doc)
+			if err != nil {
+				// Shouldn't happen, we need to look at the doc here
+				hub := sentry.GetHubFromContext(ctx)
+				hub.WithScope(func(scope *sentry.Scope) {
+					scope.SetTag("ref", doc.Ref.Path)
+					scope.SetLevel(sentry.LevelError)
+					hub.CaptureException(err)
+				})
+				l.logger.Error(
+					"firestorelistener.listenByPolling upsert error",
+					zap.Error(err),
+					zap.String("ref", doc.Ref.Path),
+				)
+			}
+		}
+
+		// Get cursor from last doc
+		last := docs[len(docs)-1]
+		type AppbutlerCursorDoc struct {
+			RoutingChangedAt time.Time `firestore:"routingChangedAt"`
+		}
+		var appbutlerCursorDoc AppbutlerCursorDoc
+		if err := last.DataTo(&appbutlerCursorDoc); err != nil || appbutlerCursorDoc.RoutingChangedAt.IsZero() {
+			// Shouldn't happen, we need to look at the doc here
+			hub := sentry.GetHubFromContext(ctx)
+			hub.WithScope(func(scope *sentry.Scope) {
+				scope.SetTag("ref", last.Ref.Path)
+				scope.SetLevel(sentry.LevelError)
+				hub.CaptureException(err)
+			})
+			l.logger.Error(
+				"firestorelistener.listenByPolling failed to read cursor from last doc",
+				zap.Error(err),
+				zap.String("ref", last.Ref.Path),
+			)
+			// Can't continue here
+			return err
+		}
+		// Store cursor for next poll batch
+		cursor = cursorType{appbutlerCursorDoc.RoutingChangedAt, last.Ref.ID}
+
+		l.logger.Info(
+			"firestorelistener.listenByPolling up to date until cursor",
+			zap.String("lastRef", last.Ref.Path),
+			zap.Time("cursorTs", cursor.ts),
+			zap.String("cursorId", cursor.id),
+		)
+	}
+
+	return ctx.Err()
 }
 
 // Note: If this panics we want it to blow up the service.
@@ -258,10 +383,8 @@ func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) 
 
 			// Notify the provisioner that we've done the first sync.
 			firstSyncDone()
-		} else {
-			if SIMULATE_FAILURE {
-				return ErrSimulatedFailure
-			}
+		} else if SIMULATE_FAILURE {
+			return ErrSimulatedFailure
 		}
 	}
 
@@ -456,17 +579,11 @@ func (l *Listener) checkFailures() error {
 }
 
 func (l *Listener) CountUpstreams() int {
-	return sizeOfSynMap(l.GetInfra().Services)
+	return l.GetInfra().CountServices()
 }
 
 func (l *Listener) CountDomains() int {
-	return sizeOfSynMap(l.GetInfra().Domains)
-}
-
-func sizeOfSynMap(m *sync.Map) int {
-	n := pointer.To(0)
-	m.Range(func(k, v any) bool { *n += 1; return true })
-	return *n
+	return l.GetInfra().CountDomains()
 }
 
 // Interface guards

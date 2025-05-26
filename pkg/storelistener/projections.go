@@ -6,11 +6,15 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"github.com/AlekSi/pointer"
 )
+
+const AppbutlerCursorTimestampField = "routingChangedAt"
 
 // Partial Appbutler document to be parsed from firestore document
 type AppbutlerDoc struct {
-	UpdateTime time.Time
+	// Updated when routing changes
+	RoutingChangedAt time.Time `firestore:"routingChangedAt,omitempty"`
 
 	// Which project is it owned by (should never be blank now)
 	ProjectId string `firestore:"projectId,omitempty"`
@@ -18,11 +22,11 @@ type AppbutlerDoc struct {
 	// What is the service for (devx or prodx)
 	ServiceType string `firestore:"serviceType,omitempty"`
 
-	// Is it ready to serve (should always be true now)
-	// ServiceIsReady      bool       `firestore:"serviceIsReady,omitempty"`
+	// Is it not deleted
+	MarkedForDeletionAt *time.Time `firestore:"markedForDeletionAt,omitempty"`
 
-	// Is it not deleted (should always be nil now)
-	// MarkedForDeletionAt *time.Time  `firestore:"markedForDeletionAt,omitempty"`
+	// Is it ready to serve
+	ServiceIsReady bool `firestore:"serviceIsReady,omitempty"`
 
 	// What is the url of the target service
 	// ... in google cloud run
@@ -33,12 +37,15 @@ type AppbutlerDoc struct {
 	InternalURL string `firestore:"internalURL,omitempty"`
 
 	// Where is it deployed (no CustomDomain means username.databutton.app)
-	Username     string `firestore:"username,omitempty"`
+	Username string `firestore:"username,omitempty"`
+	// Appname     string `firestore:"appname,omitempty"` // TODO: Use this for _users/username/apps/appname URL?
 	CustomDomain string `firestore:"customDomain,omitempty"`
 }
 
 func (data AppbutlerDoc) Fields() []string {
 	return []string{
+		AppbutlerCursorTimestampField,
+		//
 		"projectId",
 		"serviceType",
 		//
@@ -108,20 +115,96 @@ type DomainValues struct {
 	ProjectId string
 }
 
+type AppbutlerValues struct {
+	ProjectId    string
+	ServiceType  string
+	CustomDomain string
+}
+
 type InfraProjection struct {
-	Services *sync.Map
-	Domains  *sync.Map
+	Services   *sync.Map
+	Domains    *sync.Map
+	Appbutlers *sync.Map
 }
 
 func NewInfraProjection() *InfraProjection {
 	return &InfraProjection{
-		Services: &sync.Map{},
-		Domains:  &sync.Map{},
+		Services:   &sync.Map{},
+		Domains:    &sync.Map{},
+		Appbutlers: &sync.Map{},
 	}
 }
 
+func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
+	var data AppbutlerDoc
+	if err := doc.DataTo(&data); err != nil {
+		return err
+	}
+
+	// Delete or skip if:
+	// - not ready
+	// - marked for deletion
+	// - from pool
+	if !data.ServiceIsReady || data.MarkedForDeletionAt != nil || data.ProjectId == "" {
+		// Ignore if we have no record of the appbutler,
+		// otherwise ignore new values in data
+		// and clean up based on our cached appbutler doc
+		appbutlerId := doc.Ref.ID
+		if value, ok := p.Appbutlers.Load(appbutlerId); ok {
+			appbutler := value.(AppbutlerValues)
+
+			p.Services.Delete(
+				ServiceKey{
+					ProjectId:   appbutler.ProjectId,
+					ServiceType: appbutler.ServiceType,
+				}.String(),
+			)
+
+			if appbutler.CustomDomain != "" {
+				p.Domains.Delete(appbutler.CustomDomain)
+			}
+
+			p.Appbutlers.Delete(appbutlerId)
+		}
+		return nil
+	}
+
+	if err := data.validate(); err != nil {
+		return err
+	}
+
+	// Store for lookup on appbutlerId
+	p.Appbutlers.Store(
+		doc.Ref.ID,
+		AppbutlerValues{
+			ProjectId:    data.ProjectId,
+			ServiceType:  data.ServiceType,
+			CustomDomain: data.CustomDomain,
+		},
+	)
+
+	// Store for lookup on customDomain
+	if data.CustomDomain != "" {
+		p.Domains.Store(data.CustomDomain, DomainValues{ProjectId: data.ProjectId})
+	}
+
+	// Store for lookup on projectId and serviceType
+	p.Services.Store(
+		ServiceKey{
+			ProjectId:   data.ProjectId,
+			ServiceType: data.ServiceType,
+		}.String(),
+		ServiceValues{
+			Upstream: data.makeTargetUrl(),
+			Username: data.Username,
+		},
+	)
+
+	return nil
+}
+
 func (p *InfraProjection) Remove(doc *firestore.DocumentSnapshot) error {
-	// FIXME: TEST Will we get any data here when it has been removed?
+	// TODO: TEST Will we get any data here when it has been removed?
 	//        Or will we need to add a map to index from doc.ID to service key?
 	// id := doc.Ref.ID
 
@@ -192,4 +275,36 @@ func (p *InfraProjection) GetService(projectId, serviceType string) (ServiceValu
 	}
 	service, ok := value.(ServiceValues)
 	return service, ok
+}
+
+func sizeOfSynMap(m *sync.Map) int {
+	n := pointer.To(0)
+	m.Range(func(k, v any) bool { *n += 1; return true })
+	return *n
+}
+
+func (p *InfraProjection) CountServices() int {
+	return sizeOfSynMap(p.Services)
+}
+
+func (p *InfraProjection) CountDomains() int {
+	return sizeOfSynMap(p.Domains)
+}
+
+func (p *InfraProjection) DebugDumpDomains() {
+	fmt.Printf("/////// BEGIN DEBUGGING DOMAINS DUMP\n")
+	p.Domains.Range(func(k any, v any) bool {
+		fmt.Printf("  %s : %+v\n", k, v)
+		return true
+	})
+	fmt.Printf("/////// END DEBUGGING DOMAINS DUMP\n")
+}
+
+func (p *InfraProjection) DebugDumpServices() {
+	fmt.Printf("/////// BEGIN DEBUGGING SERVICES DUMP\n")
+	p.Services.Range(func(k any, v any) bool {
+		fmt.Printf("  %s : %+v\n", k, v)
+		return true
+	})
+	fmt.Printf("/////// END DEBUGGING SERVICES DUMP\n")
 }

@@ -157,23 +157,11 @@ func makeOriginalPath(projectID, serviceType, path string) string {
 }
 
 func (m *DevxMiddlewareModule) DebugDumpDomains() {
-	fmt.Printf("/////// BEGIN DEBUGGING DOMAINS DUMP\n")
-	infra := m.listener.(GetInfraer).GetInfra()
-	infra.Domains.Range(func(k any, v any) bool {
-		fmt.Printf("  %s : %+v\n", k, v)
-		return true
-	})
-	fmt.Printf("/////// END DEBUGGING DOMAINS DUMP\n")
+	m.listener.(GetInfraer).GetInfra().DebugDumpDomains()
 }
 
 func (m *DevxMiddlewareModule) DebugDumpServices() {
-	fmt.Printf("/////// BEGIN DEBUGGING SERVICES DUMP\n")
-	infra := m.listener.(GetInfraer).GetInfra()
-	infra.Services.Range(func(k any, v any) bool {
-		fmt.Printf("  %s : %+v\n", k, v)
-		return true
-	})
-	fmt.Printf("/////// END DEBUGGING SERVICES DUMP\n")
+	m.listener.(GetInfraer).GetInfra().DebugDumpServices()
 }
 
 type InfraResponse struct {
@@ -290,7 +278,8 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// - prodx          username.databutton.app   /appname/
 	// - custom         custom.com                /
 
-	// FIXME: Make the non-_projects cases work
+	// TODO: Make the non-_projects cases work, add for example /_apps/users/{username}/apps/{appname}/
+	//
 	// API may be called on URL:
 	// - appx             databutton.com            /_projects/{projectID}/dbtn/{serviceType}/
 	// - appx             api.databutton.com        /_projects/{projectID}/dbtn/{serviceType}/
@@ -301,7 +290,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		// This means the URL is not _projects/...
 		// Get project id from domain lookup
 		if strings.HasSuffix(originHost, ".databutton.app") {
-			// FIXME: Case: username.databutton.app/appname/api/...
+			// TODO: Case: username.databutton.app/appname/api/...
 			// originHost = username.databutton.app
 			// appnameHeader := r.Header.Get("X-Databutton-Appname")
 			// projectID = m.listener.LookupUpProjectIdForDatabuttonAppDomain(
@@ -309,7 +298,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			// 	appnameHeader,
 			// )
 		} else {
-			// FIXME: Case: custom.com/api/...
+			// TODO: Case: custom.com/api/...
 			// originHost = custom.com
 			projectID = m.listener.LookupUpProjectIdFromDomain(originHost)
 		}

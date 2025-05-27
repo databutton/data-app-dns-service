@@ -2,11 +2,10 @@ package storelistener
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	"cloud.google.com/go/firestore"
-	"github.com/AlekSi/pointer"
+	"github.com/databutton/data-app-dns-service/pkg/threadsafemap"
 )
 
 const AppbutlerCursorTimestampField = "routingChangedAt"
@@ -122,19 +121,44 @@ type AppbutlerValues struct {
 }
 
 type InfraProjection struct {
-	Services   *sync.Map
-	Domains    *sync.Map
-	Appbutlers *sync.Map
+	Services   *threadsafemap.Map[string, ServiceValues]
+	Domains    *threadsafemap.Map[string, DomainValues]
+	Appbutlers *threadsafemap.Map[string, AppbutlerValues]
 }
 
 func NewInfraProjection() *InfraProjection {
 	return &InfraProjection{
-		Services:   &sync.Map{},
-		Domains:    &sync.Map{},
-		Appbutlers: &sync.Map{},
+		Services:   threadsafemap.New[string, ServiceValues](),
+		Domains:    threadsafemap.New[string, DomainValues](),
+		Appbutlers: threadsafemap.New[string, AppbutlerValues](),
 	}
 }
 
+func (p *InfraProjection) GetService(projectId, serviceType string) (ServiceValues, bool) {
+	return p.Services.Get(ServiceKey{ProjectId: projectId, ServiceType: serviceType}.String())
+}
+
+func (p *InfraProjection) GetDomain(customDomain string) (DomainValues, bool) {
+	return p.Domains.Get(customDomain)
+}
+
+func (p *InfraProjection) GetAppbutler(appbutlerId string) (AppbutlerValues, bool) {
+	return p.Appbutlers.Get(appbutlerId)
+}
+
+func (p *InfraProjection) CountServices() int {
+	return p.Services.Len()
+}
+
+func (p *InfraProjection) CountDomains() int {
+	return p.Domains.Len()
+}
+
+func (p *InfraProjection) CountAppbutlers() int {
+	return p.Appbutlers.Len()
+}
+
+// UpsertPolled is the upsert-or-delete version used by polling implementation
 func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
@@ -150,10 +174,8 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 		// otherwise ignore new values in data
 		// and clean up based on our cached appbutler doc
 		appbutlerId := doc.Ref.ID
-		if value, ok := p.Appbutlers.Load(appbutlerId); ok {
-			appbutler := value.(AppbutlerValues)
-
-			p.Services.Delete(
+		if appbutler, ok := p.Appbutlers.Get(appbutlerId); ok {
+			p.Services.DeleteSync(
 				ServiceKey{
 					ProjectId:   appbutler.ProjectId,
 					ServiceType: appbutler.ServiceType,
@@ -161,10 +183,10 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 			)
 
 			if appbutler.CustomDomain != "" {
-				p.Domains.Delete(appbutler.CustomDomain)
+				p.Domains.DeleteSync(appbutler.CustomDomain)
 			}
 
-			p.Appbutlers.Delete(appbutlerId)
+			p.Appbutlers.DeleteSync(appbutlerId)
 		}
 		return nil
 	}
@@ -174,7 +196,7 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 	}
 
 	// Store for lookup on appbutlerId
-	p.Appbutlers.Store(
+	p.Appbutlers.SetSync(
 		doc.Ref.ID,
 		AppbutlerValues{
 			ProjectId:    data.ProjectId,
@@ -185,11 +207,11 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 
 	// Store for lookup on customDomain
 	if data.CustomDomain != "" {
-		p.Domains.Store(data.CustomDomain, DomainValues{ProjectId: data.ProjectId})
+		p.Domains.SetSync(data.CustomDomain, DomainValues{ProjectId: data.ProjectId})
 	}
 
 	// Store for lookup on projectId and serviceType
-	p.Services.Store(
+	p.Services.SetSync(
 		ServiceKey{
 			ProjectId:   data.ProjectId,
 			ServiceType: data.ServiceType,
@@ -203,7 +225,8 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 	return nil
 }
 
-func (p *InfraProjection) Remove(doc *firestore.DocumentSnapshot) error {
+// RemoveForSnapshotListener is used together with Upsert by the snapshot listener implementation
+func (p *InfraProjection) RemoveForSnapshotListener(doc *firestore.DocumentSnapshot) error {
 	// TODO: TEST Will we get any data here when it has been removed?
 	//        Or will we need to add a map to index from doc.ID to service key?
 	// id := doc.Ref.ID
@@ -214,15 +237,15 @@ func (p *InfraProjection) Remove(doc *firestore.DocumentSnapshot) error {
 	}
 
 	serviceKey := ServiceKey{ProjectId: data.ProjectId, ServiceType: data.ServiceType}.String()
-	p.Services.Delete(serviceKey)
+	p.Services.DeleteSync(serviceKey)
 
 	if data.CustomDomain != "" {
-		domain, ok := p.Domains.Load(data.CustomDomain)
+		domain, ok := p.Domains.Get(data.CustomDomain)
 		if ok {
 			// Note: There's some potential for getting things wrong here if the source data
 			// doesn't adhere to expected invariants such as projectid 1-1 domain
-			if domain.(DomainValues).ProjectId == data.ProjectId {
-				p.Domains.Delete(data.CustomDomain)
+			if domain.ProjectId == data.ProjectId {
+				p.Domains.DeleteSync(data.CustomDomain)
 			}
 		}
 	}
@@ -230,7 +253,8 @@ func (p *InfraProjection) Remove(doc *firestore.DocumentSnapshot) error {
 	return nil
 }
 
-func (p *InfraProjection) Upsert(doc *firestore.DocumentSnapshot) error {
+// UpsertForSnapshotListener is used together with Remove by the snapshot listener implementation
+func (p *InfraProjection) UpsertForSnapshotListener(doc *firestore.DocumentSnapshot) error {
 	var data AppbutlerDoc
 	if err := doc.DataTo(&data); err != nil {
 		return err
@@ -248,63 +272,36 @@ func (p *InfraProjection) Upsert(doc *firestore.DocumentSnapshot) error {
 	// Add to projection maps
 	serviceKey := ServiceKey{ProjectId: data.ProjectId, ServiceType: data.ServiceType}.String()
 	service := ServiceValues{Upstream: data.makeTargetUrl(), Username: data.Username}
-	p.Services.Store(serviceKey, service)
+	p.Services.SetSync(serviceKey, service)
 
 	if data.CustomDomain != "" {
 		domain := DomainValues{ProjectId: data.ProjectId}
-		p.Domains.Store(data.CustomDomain, domain)
+		p.Domains.SetSync(data.CustomDomain, domain)
 	}
 
 	return nil
 }
 
-func (p *InfraProjection) GetDomain(customDomain string) (DomainValues, bool) {
-	value, found := p.Domains.Load(customDomain)
-	if !found {
-		return DomainValues{}, false
-	}
-	domain, ok := value.(DomainValues)
-	return domain, ok
-}
-
-func (p *InfraProjection) GetService(projectId, serviceType string) (ServiceValues, bool) {
-	serviceKey := ServiceKey{ProjectId: projectId, ServiceType: serviceType}.String()
-	value, found := p.Services.Load(serviceKey)
-	if !found {
-		return ServiceValues{}, false
-	}
-	service, ok := value.(ServiceValues)
-	return service, ok
-}
-
-func sizeOfSynMap(m *sync.Map) int {
-	n := pointer.To(0)
-	m.Range(func(k, v any) bool { *n += 1; return true })
-	return *n
-}
-
-func (p *InfraProjection) CountServices() int {
-	return sizeOfSynMap(p.Services)
-}
-
-func (p *InfraProjection) CountDomains() int {
-	return sizeOfSynMap(p.Domains)
-}
-
 func (p *InfraProjection) DebugDumpDomains() {
 	fmt.Printf("/////// BEGIN DEBUGGING DOMAINS DUMP\n")
-	p.Domains.Range(func(k any, v any) bool {
-		fmt.Printf("  %s : %+v\n", k, v)
-		return true
-	})
+	for _, kv := range p.Domains.Items() {
+		fmt.Printf("  %s : %+v\n", kv.K, kv.V)
+	}
 	fmt.Printf("/////// END DEBUGGING DOMAINS DUMP\n")
 }
 
 func (p *InfraProjection) DebugDumpServices() {
 	fmt.Printf("/////// BEGIN DEBUGGING SERVICES DUMP\n")
-	p.Services.Range(func(k any, v any) bool {
-		fmt.Printf("  %s : %+v\n", k, v)
-		return true
-	})
+	for _, kv := range p.Services.Items() {
+		fmt.Printf("  %s : %+v\n", kv.K, kv.V)
+	}
 	fmt.Printf("/////// END DEBUGGING SERVICES DUMP\n")
+}
+
+func (p *InfraProjection) DebugDumpAppbutlers() {
+	fmt.Printf("/////// BEGIN DEBUGGING APPBUTLERS DUMP\n")
+	for _, kv := range p.Appbutlers.Items() {
+		fmt.Printf("  %s : %+v\n", kv.K, kv.V)
+	}
+	fmt.Printf("/////// END DEBUGGING APPBUTLERS DUMP\n")
 }

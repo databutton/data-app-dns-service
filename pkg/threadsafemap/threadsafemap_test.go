@@ -29,7 +29,7 @@ func TestMapClone(t *testing.T) {
 
 func TestThreadSafeMap(t *testing.T) {
 	// Create a new thread-safe map
-	tsm := NewThreadSafeMap[string, int]()
+	tsm := New[string, int]()
 	defer tsm.Close()
 
 	// Create from existing map

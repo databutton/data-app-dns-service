@@ -170,6 +170,52 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 	}
 }
 
+func (l *Listener) doSingleLookup(ctx context.Context, projectID, serviceType string) error {
+	infra := l.GetInfra()
+	if infra == nil {
+		return errors.Errorf("infra is nil")
+	}
+
+	collectionName := CollectionAppbutlers
+	collection := l.firestoreClient.Collection(collectionName)
+	if collection == nil {
+		return errors.Errorf("Collection %s not found", collectionName)
+	}
+
+	// There should be only one doc with this combination of projectId and serviceType
+	query := collection.
+		Select(AppbutlerDoc{}.Fields()...).
+		Where("projectId", "==", projectID).
+		Where("serviceType", "==", serviceType).
+		Limit(1)
+
+	docs, err := query.Documents(ctx).GetAll()
+	if err != nil {
+		return err
+	}
+	if len(docs) != 1 {
+		return errors.Errorf("Expected 1 doc, got %d", len(docs))
+	}
+
+	doc := docs[0]
+	if err := l.infra.UpsertPolled(doc); err != nil {
+		// Shouldn't happen, we need to look at the doc here
+		hub := sentry.GetHubFromContext(ctx)
+		hub.WithScope(func(scope *sentry.Scope) {
+			scope.SetTag("ref", doc.Ref.Path)
+			scope.SetLevel(sentry.LevelError)
+			hub.CaptureException(err)
+		})
+		l.logger.Error(
+			"firestorelistener.singleLookup upsert error",
+			zap.Error(err),
+			zap.String("ref", doc.Ref.Path),
+		)
+	}
+
+	return nil
+}
+
 func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) error {
 	l.logger.Info("firestorelistener.listenByPolling")
 
@@ -180,9 +226,8 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 	}
 
 	// Page tracking
-	const pageSize = 1000
-	const sleepDuration = 3 * time.Second
-	startTime := time.Now()
+	const pageSize = 2000
+	const nextSleepDuration = 1 * time.Second
 	type cursorType struct {
 		ts time.Time
 		id string
@@ -198,7 +243,7 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 	// Poll until canceled
 	for ctx.Err() == nil {
 		query := collection.
-			// Select(AppbutlerDoc{}.Fields()...).
+			Select(AppbutlerDoc{}.Fields()...).
 			OrderBy(AppbutlerCursorTimestampField, firestore.Asc).
 			OrderBy(firestore.DocumentID, firestore.Asc)
 		if cursor != (cursorType{}) {
@@ -217,19 +262,19 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 			return ErrSimulatedFailure
 		}
 
-		if first && (len(docs) < pageSize || startTime.Before(docs[len(docs)-1].UpdateTime)) {
-			l.logger.Info("firestorelistener.listenByPolling all docs fetched once")
-			first = false
-
-			// Swap out the infra projection after the first snapshot has completed processing
-			l.SetInfra(infra)
-
-			firstSyncDone()
-		}
-
 		if len(docs) == 0 {
-			l.logger.Info("firestorelistener.listenByPolling no docs found")
-			time.Sleep(sleepDuration)
+			if first {
+				l.logger.Info("firestorelistener.listenByPolling all docs fetched once")
+				first = false
+
+				// Swap out the infra projection after the first snapshot has completed processing
+				l.SetInfra(infra)
+
+				firstSyncDone()
+			}
+
+			l.logger.Info("firestorelistener.listenByPolling no new docs found")
+			time.Sleep(nextSleepDuration)
 			continue
 		}
 
@@ -434,9 +479,9 @@ func (l *Listener) processSnapshot(ctx context.Context, infra *InfraProjection, 
 		var err error
 		switch change.Kind {
 		case firestore.DocumentAdded, firestore.DocumentModified:
-			err = infra.Upsert(change.Doc)
+			err = infra.UpsertForSnapshotListener(change.Doc)
 		case firestore.DocumentRemoved:
-			err = infra.Remove(change.Doc)
+			err = infra.RemoveForSnapshotListener(change.Doc)
 		default:
 			panic("Invalid change kind")
 		}
@@ -481,26 +526,38 @@ func (l *Listener) GetInfra() *InfraProjection {
 	return l.infra
 }
 
-// LookupUpstreamHost does an optimized cache lookup to get the upstream url.
+// UpstreamForProject does an optimized cache lookup to get the upstream url.
 // The rest of this Listener code is basically written to support this fast lookup.
-func (l *Listener) LookupUpstreamHost(ctx context.Context, projectID, serviceType string) string {
+func (l *Listener) UpstreamForProject(ctx context.Context, projectID, serviceType string) string {
 	service, ok := l.GetInfra().GetService(projectID, serviceType)
-	if !ok || service.Upstream == "" {
-		l.registerFailure(ctx, projectID, serviceType)
+	if ok && service.Upstream != "" {
+		return service.Upstream
 	}
-	return service.Upstream
+
+	// Try a single lookup to see if it's just a temporary failure
+	// TODO: Rate limit these lookups and perhaps blacklist projects that don't get anywhere.
+	time.Sleep(time.Second)
+	if err := l.doSingleLookup(ctx, projectID, serviceType); err == nil {
+		service, ok := l.GetInfra().GetService(projectID, serviceType)
+		if ok && service.Upstream != "" {
+			return service.Upstream
+		}
+	}
+
+	l.registerFailure(ctx, projectID, serviceType)
+	return ""
 }
 
-// LookupUsername does an optimized cache lookup to get the username for a project.
+// UsernameForProject does an optimized cache lookup to get the username for a project.
 // The rest of this Listener code is basically written to support this fast lookup.
-func (l *Listener) LookupUsername(projectID, serviceType string) string {
+func (l *Listener) UsernameForProject(projectID, serviceType string) string {
 	service, _ := l.GetInfra().GetService(projectID, serviceType)
 	return service.Username
 }
 
-// LookupUpProjectIdFromDomain does an optimized cache lookup to get the projectId a custom domain is associated with.
+// ProjectIdForDomain does an optimized cache lookup to get the projectId a custom domain is associated with.
 // The rest of this Listener code is basically written to support this fast lookup.
-func (l *Listener) LookupUpProjectIdFromDomain(originHost string) string {
+func (l *Listener) ProjectIdForDomain(originHost string) string {
 	infra := l.GetInfra()
 
 	domain, ok := infra.GetDomain(originHost)

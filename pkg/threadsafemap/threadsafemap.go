@@ -13,8 +13,8 @@ type writeOp[K comparable, V any] struct {
 	del   bool
 }
 
-// ThreadSafeMap is a generic thread-safe map implementation
-type ThreadSafeMap[K comparable, V any] struct {
+// Map is a generic thread-safe map implementation
+type Map[K comparable, V any] struct {
 	data      map[K]V
 	mu        sync.RWMutex
 	writeCh   chan writeOp[K, V]
@@ -23,7 +23,7 @@ type ThreadSafeMap[K comparable, V any] struct {
 }
 
 // NewThreadSafeMapFromMap creates a new thread-safe map from an existing map (using a shallow copy)
-func NewThreadSafeMapFromMap[K comparable, V any](existing map[K]V) *ThreadSafeMap[K, V] {
+func NewThreadSafeMapFromMap[K comparable, V any](existing map[K]V) *Map[K, V] {
 	var data map[K]V
 	if existing == nil {
 		data = make(map[K]V)
@@ -31,7 +31,7 @@ func NewThreadSafeMapFromMap[K comparable, V any](existing map[K]V) *ThreadSafeM
 		data = maps.Clone(existing)
 	}
 
-	tsm := &ThreadSafeMap[K, V]{
+	tsm := &Map[K, V]{
 		data:    data,
 		writeCh: make(chan writeOp[K, V], 100), // buffered channel
 		closeCh: make(chan struct{}),
@@ -43,13 +43,13 @@ func NewThreadSafeMapFromMap[K comparable, V any](existing map[K]V) *ThreadSafeM
 	return tsm
 }
 
-// NewThreadSafeMap creates a new thread-safe map
-func NewThreadSafeMap[K comparable, V any]() *ThreadSafeMap[K, V] {
+// New creates a new thread-safe map
+func New[K comparable, V any]() *Map[K, V] {
 	return NewThreadSafeMapFromMap[K, V](nil)
 }
 
 // Get retrieves a value from the map with minimal read lock duration
-func (tsm *ThreadSafeMap[K, V]) Get(key K) (V, bool) {
+func (tsm *Map[K, V]) Get(key K) (V, bool) {
 	tsm.mu.RLock()
 	value, ok := tsm.data[key]
 	tsm.mu.RUnlock()
@@ -57,7 +57,7 @@ func (tsm *ThreadSafeMap[K, V]) Get(key K) (V, bool) {
 }
 
 // Set adds or updates a key-value pair in the map asynchronously
-func (tsm *ThreadSafeMap[K, V]) Set(key K, value V) {
+func (tsm *Map[K, V]) SetAsync(key K, value V) {
 	select {
 	case tsm.writeCh <- writeOp[K, V]{key: key, value: value}:
 		// Write operation queued successfully
@@ -68,7 +68,7 @@ func (tsm *ThreadSafeMap[K, V]) Set(key K, value V) {
 
 // SetSync adds or updates a key-value pair in the map synchronously
 // This method blocks until the write operation is completed
-func (tsm *ThreadSafeMap[K, V]) SetSync(key K, value V) {
+func (tsm *Map[K, V]) SetSync(key K, value V) {
 	done := make(chan struct{})
 	select {
 	case tsm.writeCh <- writeOp[K, V]{key: key, value: value, done: done}:
@@ -79,7 +79,7 @@ func (tsm *ThreadSafeMap[K, V]) SetSync(key K, value V) {
 }
 
 // Delete removes a key from the map asynchronously
-func (tsm *ThreadSafeMap[K, V]) Delete(key K) {
+func (tsm *Map[K, V]) DeleteAsync(key K) {
 	var zero V
 	select {
 	case tsm.writeCh <- writeOp[K, V]{key: key, value: zero, del: true}:
@@ -90,7 +90,7 @@ func (tsm *ThreadSafeMap[K, V]) Delete(key K) {
 }
 
 // DeleteSync removes a key from the map synchronously
-func (tsm *ThreadSafeMap[K, V]) DeleteSync(key K) {
+func (tsm *Map[K, V]) DeleteSync(key K) {
 	done := make(chan struct{})
 	var zero V
 	select {
@@ -102,7 +102,7 @@ func (tsm *ThreadSafeMap[K, V]) DeleteSync(key K) {
 }
 
 // Len returns the current number of elements in the map
-func (tsm *ThreadSafeMap[K, V]) Len() int {
+func (tsm *Map[K, V]) Len() int {
 	tsm.mu.RLock()
 	length := len(tsm.data)
 	tsm.mu.RUnlock()
@@ -110,7 +110,7 @@ func (tsm *ThreadSafeMap[K, V]) Len() int {
 }
 
 // Keys returns a slice of all keys in the map
-func (tsm *ThreadSafeMap[K, V]) Keys() []K {
+func (tsm *Map[K, V]) Keys() []K {
 	tsm.mu.RLock()
 	keys := make([]K, 0, len(tsm.data))
 	for k := range tsm.data {
@@ -120,15 +120,31 @@ func (tsm *ThreadSafeMap[K, V]) Keys() []K {
 	return keys
 }
 
+type KV[K comparable, V any] struct {
+	K K
+	V V
+}
+
+// Items returns a slice of all key,value pairs in the map
+func (tsm *Map[K, V]) Items() []KV[K, V] {
+	tsm.mu.RLock()
+	items := make([]KV[K, V], 0, len(tsm.data))
+	for k, v := range tsm.data {
+		items = append(items, KV[K, V]{K: k, V: v})
+	}
+	tsm.mu.RUnlock()
+	return items
+}
+
 // Close shuts down the map and stops the write worker
-func (tsm *ThreadSafeMap[K, V]) Close() {
+func (tsm *Map[K, V]) Close() {
 	tsm.closeOnce.Do(func() {
 		close(tsm.closeCh)
 	})
 }
 
 // writeWorker is the goroutine that handles all write operations
-func (tsm *ThreadSafeMap[K, V]) writeWorker() {
+func (tsm *Map[K, V]) writeWorker() {
 	for {
 		select {
 		case op := <-tsm.writeCh:

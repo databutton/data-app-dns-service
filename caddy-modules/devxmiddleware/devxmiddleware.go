@@ -32,9 +32,9 @@ const (
 var EnableExtraDebugLogsForAllRequests = os.Getenv("ENABLE_EXTRA_DEBUG_LOGS_FOR_ALL_REQUESTS") == "true"
 
 type LookerUper interface {
-	LookupUpProjectIdFromDomain(domain string) string
-	LookupUpstreamHost(ctx context.Context, projectID, serviceType string) string
-	LookupUsername(projectID, serviceType string) string
+	ProjectIdForDomain(domain string) string
+	UpstreamForProject(ctx context.Context, projectID, serviceType string) string
+	UsernameForProject(projectID, serviceType string) string
 }
 
 // For debugging
@@ -170,7 +170,12 @@ type InfraResponse struct {
 	Context map[string]string `json:"context,omitempty"`
 }
 
-func (m *DevxMiddlewareModule) writeErrorResponse(w http.ResponseWriter, status int, message string, context map[string]string) error {
+func (m *DevxMiddlewareModule) writeErrorResponse(
+	w http.ResponseWriter,
+	status int,
+	message string,
+	context map[string]string,
+) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	err := json.NewEncoder(w).Encode(InfraResponse{
@@ -300,7 +305,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		} else {
 			// TODO: Case: custom.com/api/...
 			// originHost = custom.com
-			projectID = m.listener.LookupUpProjectIdFromDomain(originHost)
+			projectID = m.listener.ProjectIdForDomain(originHost)
 		}
 
 		if projectID == "" {
@@ -309,7 +314,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				"No projectId and domain lookup failed",
 				zap.String("originHost", originHost),
 			)
-			return m.writeErrorResponse(w, http.StatusBadGateway, "No projectId to identify the app in URL, and domain lookup failed", map[string]string{
+			return m.writeErrorResponse(w, http.StatusServiceUnavailable, "No projectId to identify the app in URL, and domain lookup failed", map[string]string{
 				"Origin": originHeader,
 			})
 		}
@@ -358,7 +363,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 			// Compare origin url username to app owner username
 			originUsername := strings.TrimSuffix(originHost, ".databutton.app")
-			ownerUsername := m.listener.LookupUsername(projectID, serviceType)
+			ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
 			if originUsername == ownerUsername {
 				// Only set cors if username is owner of projectID
 				corsOrigin = originHeader
@@ -372,7 +377,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					zap.Bool("isDebugCase", enableExtraDebugLogs),
 				)
 				if r.Method == "OPTIONS" {
-					return m.writeErrorResponse(w, http.StatusBadGateway, msg, map[string]string{
+					return m.writeErrorResponse(w, http.StatusNoContent, msg, map[string]string{
 						"Origin":      originHeader,
 						"ProjectID":   projectID,
 						"ServiceType": serviceType,
@@ -390,7 +395,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			r.Header.Set("X-Dbtn-Proxy-Case", "beyond-customdomain")
 
 			// Get project id from domain lookup (for cors check only!)
-			originDomainProjectID := m.listener.LookupUpProjectIdFromDomain(originHost)
+			originDomainProjectID := m.listener.ProjectIdForDomain(originHost)
 			if originDomainProjectID == projectID {
 				// Set cors if project found for this domain and header and origin matches
 				corsOrigin = originHeader
@@ -431,7 +436,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Look up upstream URL
-	upstream := m.listener.LookupUpstreamHost(ctx, projectID, serviceType)
+	upstream := m.listener.UpstreamForProject(ctx, projectID, serviceType)
 	if upstream == "" {
 		m.logger.Warn("devxmiddleware: upstream is blank",
 			zap.String("projectID", projectID),
@@ -439,11 +444,16 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			zap.String("originHost", originHost),
 			zap.Bool("isDebugCase", enableExtraDebugLogs),
 		)
-		return m.writeErrorResponse(w, http.StatusBadGateway, "Found no backend service registered for this app", map[string]string{
-			"Origin":      originHeader,
-			"ProjectID":   projectID,
-			"ServiceType": serviceType,
-		})
+		return m.writeErrorResponse(
+			w,
+			http.StatusServiceUnavailable,
+			"Found no backend service registered for this app",
+			map[string]string{
+				"Origin":      originHeader,
+				"ProjectID":   projectID,
+				"ServiceType": serviceType,
+			},
+		)
 	}
 
 	// For testing what gets passed on by caddy to upstream

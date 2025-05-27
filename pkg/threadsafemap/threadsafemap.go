@@ -143,49 +143,45 @@ func (tsm *Map[K, V]) Close() {
 	})
 }
 
+// Apply single operation
+func (tsm *Map[K, V]) applyOp(op writeOp[K, V]) {
+	if op.del {
+		tsm.mu.Lock()
+		delete(tsm.data, op.key)
+		tsm.mu.Unlock()
+	} else {
+		tsm.mu.Lock()
+		tsm.data[op.key] = op.value
+		tsm.mu.Unlock()
+	}
+
+	// Signal completion if requested
+	if op.done != nil {
+		close(op.done)
+	}
+}
+
+// Drain remaining operations
+func (tsm *Map[K, V]) Drain() {
+	for {
+		select {
+		case op := <-tsm.writeCh:
+			tsm.applyOp(op)
+		default:
+			return // No more operations to process
+		}
+	}
+}
+
 // writeWorker is the goroutine that handles all write operations
 func (tsm *Map[K, V]) writeWorker() {
 	for {
 		select {
 		case op := <-tsm.writeCh:
-			// Hold write lock for minimal duration
-			tsm.mu.Lock()
-			if op.del {
-				// This is a delete operation
-				delete(tsm.data, op.key)
-			} else {
-				// This is a set operation
-				tsm.data[op.key] = op.value
-			}
-			tsm.mu.Unlock()
-
-			// Signal completion if requested
-			if op.done != nil {
-				close(op.done)
-			}
-
+			tsm.applyOp(op)
 		case <-tsm.closeCh:
 			// Drain remaining operations before closing
-			for {
-				select {
-				case op := <-tsm.writeCh:
-					if op.del {
-						tsm.mu.Lock()
-						delete(tsm.data, op.key)
-						tsm.mu.Unlock()
-					} else {
-						tsm.mu.Lock()
-						tsm.data[op.key] = op.value
-						tsm.mu.Unlock()
-					}
-
-					if op.done != nil {
-						close(op.done)
-					}
-				default:
-					return // No more operations to process
-				}
-			}
+			tsm.Drain()
 		}
 	}
 }

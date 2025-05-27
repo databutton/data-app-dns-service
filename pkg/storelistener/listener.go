@@ -226,7 +226,7 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 	}
 
 	// Page tracking
-	const pageSize = 2000
+	const pageSize = 5000
 	const nextSleepDuration = 1 * time.Second
 	type cursorType struct {
 		ts time.Time

@@ -374,6 +374,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					zap.String("serviceType", serviceType),
 					zap.String("originHost", originHost),
 					zap.String("originUsername", originUsername),
+					zap.String("ownerUsername", ownerUsername),
 					zap.Bool("isDebugCase", enableExtraDebugLogs),
 				)
 				if r.Method == "OPTIONS" {

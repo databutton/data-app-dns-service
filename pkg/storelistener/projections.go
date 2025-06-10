@@ -25,7 +25,7 @@ type AppbutlerDoc struct {
 	MarkedForDeletionAt *time.Time `firestore:"markedForDeletionAt,omitempty"`
 
 	// Is it ready to serve
-	ServiceIsReady bool `firestore:"serviceIsReady,omitempty"`
+	// ServiceIsReady bool `firestore:"serviceIsReady,omitempty"`
 
 	// What is the url of the target service
 	// ... in google cloud run
@@ -49,7 +49,7 @@ func (data AppbutlerDoc) Fields() []string {
 		"serviceType",
 		//
 		"markedForDeletionAt",
-		"serviceIsReady",
+		// "serviceIsReady",
 		//
 		"regionCode",
 		"cloudRunServiceId",
@@ -166,10 +166,9 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 	}
 
 	// Delete or skip if:
-	// - not ready
 	// - marked for deletion
 	// - from pool
-	if !data.ServiceIsReady || data.MarkedForDeletionAt != nil || data.ProjectId == "" {
+	if data.MarkedForDeletionAt != nil || data.ProjectId == "" {
 		// Ignore if we have no record of the appbutler,
 		// otherwise ignore new values in data
 		// and clean up based on our cached appbutler doc
@@ -191,6 +190,7 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 		return nil
 	}
 
+	// Check that we have the data needed to set up routing
 	if err := data.validate(); err != nil {
 		return err
 	}

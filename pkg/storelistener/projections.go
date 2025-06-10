@@ -25,7 +25,7 @@ type AppbutlerDoc struct {
 	MarkedForDeletionAt *time.Time `firestore:"markedForDeletionAt,omitempty"`
 
 	// Is it ready to serve
-	// ServiceIsReady bool `firestore:"serviceIsReady,omitempty"`
+	ServiceIsReady bool `firestore:"serviceIsReady,omitempty"`
 
 	// What is the url of the target service
 	// ... in google cloud run
@@ -49,7 +49,7 @@ func (data AppbutlerDoc) Fields() []string {
 		"serviceType",
 		//
 		"markedForDeletionAt",
-		// "serviceIsReady",
+		"serviceIsReady",
 		//
 		"regionCode",
 		"cloudRunServiceId",
@@ -165,9 +165,7 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 		return err
 	}
 
-	// Delete or skip if:
-	// - marked for deletion
-	// - from pool
+	// Remove from cache or skip deleted appbutlers and pool entries
 	if data.MarkedForDeletionAt != nil || data.ProjectId == "" {
 		// Ignore if we have no record of the appbutler,
 		// otherwise ignore new values in data
@@ -192,6 +190,11 @@ func (p *InfraProjection) UpsertPolled(doc *firestore.DocumentSnapshot) error {
 
 	// Check that we have the data needed to set up routing
 	if err := data.validate(); err != nil {
+		if !data.ServiceIsReady {
+			// Silence validation error for services what are being created
+			return nil
+		}
+		// Otherwise return the error to allow caller to make some noise
 		return err
 	}
 

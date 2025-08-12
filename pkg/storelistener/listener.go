@@ -121,18 +121,11 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 	// - If restarts > 5, die to restart service
 	restartCount := 0
 
-	const usePolling = true // FIXME: Use this always after testing and clean up code
-
 	// Loop until canceled
 	for ctx.Err() == nil {
 		l.lastRestartTime.Store(time.Now().UnixMilli())
 
-		var err error
-		if usePolling {
-			err = l.listenByPolling(ctx, firstSyncDone)
-		} else {
-			err = l.listenToSnapshots(ctx, firstSyncDone)
-		}
+		err := l.listenByPolling(ctx, firstSyncDone)
 
 		if err != nil {
 			l.logger.Error("listenToSnapshots returned error", zap.Error(err))         // NOT OBSERVED
@@ -337,109 +330,6 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 	return ctx.Err()
 }
 
-// Note: If this panics we want it to blow up the service.
-// Note: If this returns error we want it to be called again.
-func (l *Listener) listenToSnapshots(ctx context.Context, firstSyncDone func()) error {
-	l.logger.Info("firestorelistener.listenToSnapshots") // OBSERVED
-
-	collection := CollectionAppbutlers
-
-	col := l.firestoreClient.Collection(collection)
-	if col == nil {
-		panic(errors.Errorf("Collection %s not found", collection))
-	}
-
-	query := col.
-		// 'select' clauses are not supported for real-time queries."
-		// Select(AppbutlerDoc{}.Fields()...).
-		// Skip when marked for garbage collection
-		Where("markedForDeletionAt", "==", nil).
-		// Skip free pool appbutlers without assigned projects, there's nothing to route
-		// "firestore: must use '==' when comparing <nil>"
-		// Where("projectId", "!=", nil).
-		// Skip before service is ready to receive requests
-		Where("serviceIsReady", "==", true)
-
-	// TODO: Get this from env var to run locally
-	// TODO: Review query performance explanation!
-	// const getMetrics = false
-	// if getMetrics {
-	// 	query = query.WithRunOptions(firestore.ExplainOptions{Analyze: getMetrics})
-	// 	snapIter := query.Snapshots(ctx)
-	// 	docsIter := snapIter.Query.Documents(ctx)
-	// 	docs, err := docsIter.GetAll()
-	// 	// docsIter.Stop()
-	// 	metrics, err := docsIter.ExplainMetrics()
-	// 	l.dumpMetrics(snap)
-	// 	return nil
-	// }
-
-	// Create a fresh blank infra projection to populate
-	infra := NewInfraProjection()
-	first := true
-
-	totalChangeCount := new(atomic.Int64)
-	totalErrorCount := new(atomic.Int64)
-	l.resetFailures()
-
-	// Check for failures regularly and use cancel to restart listener
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		for ctx.Err() == nil {
-			err := l.checkFailures()
-			logArgs := []zap.Field{
-				zap.Time("lastRestartTime", time.UnixMilli(l.lastRestartTime.Load())),
-				zap.Int64("restartCount", l.restartCount.Load()),
-				zap.Int64("failureBucket", l.failureBucket.Load()),
-				zap.Int64("totalChanges", totalChangeCount.Load()),
-				zap.Int64("totalErrors", totalErrorCount.Load()),
-			}
-			if err != nil {
-				logArgs = append(logArgs, zap.Error(err))
-				l.logger.Error("firestorelistener.listenToSnapshots listener health check FAILED", logArgs...) // NOT OBSERVED
-				cancel()
-				return
-			}
-			l.logger.Info("firestorelistener.listenToSnapshots listener health check OK", logArgs...) // OBSERVED
-			time.Sleep(10 * time.Second)
-		}
-	}()
-
-	// Iterate over snapshots until canceled
-	snapIter := query.Snapshots(ctx)
-	for ctx.Err() == nil {
-		snap, err := snapIter.Next()
-		if err != nil {
-			l.logger.Error("firestorelistener.listenToSnapshots snapshot iterator error", zap.Error(err)) // NOT OBSERVED
-			return err
-		}
-
-		batchChangeCount, batchErrorCount := l.processSnapshot(ctx, infra, snap)
-		totalChangeCount.Add(int64(batchChangeCount))
-		totalErrorCount.Add(int64(batchErrorCount))
-
-		// Nice to have in logs while the system is new
-		// if DEBUGGING {
-		l.logger.Info("firestorelistener.listenToSnapshots processed batch", zap.Int("changes", batchChangeCount), zap.Int("errors", batchErrorCount)) // OBSERVED
-		//}
-
-		if first {
-			first = false
-
-			// Swap out the infra projection after the first snapshot has completed processing
-			l.SetInfra(infra)
-
-			// Notify the provisioner that we've done the first sync.
-			firstSyncDone()
-		} else if SIMULATE_FAILURE {
-			return ErrSimulatedFailure
-		}
-	}
-
-	return nil
-}
-
 func (l *Listener) dumpMetrics(snap *firestore.QuerySnapshot) {
 	metrics, err := snap.Documents.ExplainMetrics()
 	if err != nil || metrics == nil || metrics.PlanSummary == nil {
@@ -575,21 +465,6 @@ func (l *Listener) ProjectIdForDomain(originHost string) string {
 	return ""
 }
 
-// Parameters for leaky bucket failure count tuning
-// fails if errors per second is higher than bucketLeakPerSecond
-// long enough that the bucket flows over the maxFailureBudget limit
-const (
-	maxFailureBudget           = 5
-	bucketLeakPerSecond        = 0.1
-	minimumTimeBetweenRestarts = 3 * time.Minute
-)
-
-func (l *Listener) resetFailures() {
-	l.failureBucket.Store(0)
-	l.failedProjects = new(sync.Map) // TODO: Wrap in mutex?
-	l.lastRestartTime.Store(time.Now().UnixMilli())
-}
-
 // NB! This is called from upstreams module threads!
 func (l *Listener) registerFailure(ctx context.Context, projectID string, serviceType string) {
 	// Don't count the same serviceType+projectID, sometimes there's a single project that just keeps failing
@@ -610,6 +485,23 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 	}
 }
 
+// Currently unused? Revive or remove.
+func (l *Listener) resetFailures() {
+	l.failureBucket.Store(0)
+	l.failedProjects = new(sync.Map) // TODO: Wrap in mutex?
+	l.lastRestartTime.Store(time.Now().UnixMilli())
+}
+
+// Parameters for leaky bucket failure count tuning
+// fails if errors per second is higher than bucketLeakPerSecond
+// long enough that the bucket flows over the maxFailureBudget limit
+const (
+	maxFailureBudget           = 5
+	bucketLeakPerSecond        = 0.1
+	minimumTimeBetweenRestarts = 3 * time.Minute
+)
+
+// Currently unused? Revive or remove.
 func (l *Listener) checkFailures() error {
 	sinceLastCheck := time.Since(time.UnixMilli(l.lastCheckFailuresTime.Load()))
 	l.lastCheckFailuresTime.Store(time.Now().UnixMilli())

@@ -294,7 +294,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	if projectID == "" {
 		// This means the URL is not _projects/...
 		// Get project id from domain lookup
-		if strings.HasSuffix(originHost, ".databutton.app") {
+		if strings.HasSuffix(originHost, ".databutton.app") { // XXX
 			// TODO: Case: username.databutton.app/appname/api/...
 			// originHost = username.databutton.app
 			// appnameHeader := r.Header.Get("X-Databutton-Appname")
@@ -349,20 +349,28 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
-		} else if originHeader == "https://databutton.com" { // isDevx &&
+		} else if originHeader == "https://databutton.com" { // isDevx &&  // XXX
 			// TODO: Shouldn't prodx be disallowed here?
 			//       There was a reason for disabling the
 			//       isDevx check here but don't remember why!
 			//
 			// Devx is served from databutton.com
-			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin")
+			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin") // XXX
 			corsOrigin = originHeader
-		} else if isProdx && strings.HasSuffix(originHost, ".databutton.app") {
+		} else if originHeader == "https://riff.hot" { // isDevx &&  // XXX
+			// TODO: Shouldn't prodx be disallowed here?
+			//       There was a reason for disabling the
+			//       isDevx check here but don't remember why!
+			//
+			// Devx is served from databutton.com
+			r.Header.Set("X-Dbtn-Proxy-Case", "riff-origin") // XXX
+			corsOrigin = originHeader
+		} else if isProdx && strings.HasSuffix(originHost, ".databutton.app") { // XXX
 			// New style hosting at per-user subdomains
 			r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
 
 			// Compare origin url username to app owner username
-			originUsername := strings.TrimSuffix(originHost, ".databutton.app")
+			originUsername := strings.TrimSuffix(originHost, ".databutton.app") // XXX
 			ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
 			if originUsername == ownerUsername {
 				// Only set cors if username is owner of projectID

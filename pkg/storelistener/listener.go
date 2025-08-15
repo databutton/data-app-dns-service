@@ -288,69 +288,71 @@ func (l *Listener) listenByPolling(ctx context.Context, firstSyncDone func()) er
 					zap.Error(err),
 					zap.String("appbutlerId", doc.Ref.ID),
 				)
+				continue
+			}
+
+			// Note: Moved this into the loop to log all upserts, most of the time only one doc is read at a time:
+
+			// Pull only data we need from doc
+			type AppbutlerCursorDoc struct {
+				ProjectID        string    `firestore:"projectId"`
+				RoutingChangedAt time.Time `firestore:"routingChangedAt"`
+			}
+			var appbutlerCursorDoc AppbutlerCursorDoc
+			if err := doc.DataTo(&appbutlerCursorDoc); err != nil {
+				// Shouldn't happen, we need to look at the doc here
+				hub := sentry.GetHubFromContext(ctx)
+				hub.WithScope(func(scope *sentry.Scope) {
+					scope.SetTag("appbutlerId", doc.Ref.ID)
+					scope.SetLevel(sentry.LevelError)
+					hub.CaptureException(err)
+				})
+				l.logger.Error(
+					"firestorelistener.listenByPolling failed to read cursor from doc",
+					zap.Error(err),
+					zap.String("appbutlerId", doc.Ref.ID),
+				)
+				continue
+			}
+
+			if appbutlerCursorDoc.RoutingChangedAt.IsZero() {
+				// Shouldn't happen, we need to look at the doc here
+				err := errors.Errorf("RoutingChangedAt is zero, this should never happen")
+				hub := sentry.GetHubFromContext(ctx)
+				hub.WithScope(func(scope *sentry.Scope) {
+					scope.SetTag("appbutlerId", doc.Ref.ID)
+					scope.SetLevel(sentry.LevelError)
+					hub.CaptureException(err)
+				})
+				l.logger.Error(
+					"firestorelistener.listenByPolling read unexpected zero cursor from doc",
+					zap.Error(err),
+					zap.String("appbutlerId", doc.Ref.ID),
+					zap.String("projectId", appbutlerCursorDoc.ProjectID),
+				)
+				continue
+			}
+
+			var updatedCursor bool
+			if cursor.ts.After(appbutlerCursorDoc.RoutingChangedAt) {
+				// Shouldn't happen, as long as the query ordering is correct
+				l.logger.Error(
+					"firestorelistener.listenByPolling cursor is unexpectedly older than last upsert",
+					zap.String("lastRef", lastRef),
+					zap.Time("cursorTs", cursor.ts),
+					zap.String("cursorId", cursor.id),
+					zap.Time("appbutlerTs", appbutlerCursorDoc.RoutingChangedAt),
+					zap.String("appbutlerId", doc.Ref.ID),
+				)
+				updatedCursor = false
 			} else {
-				// Note: Moved this into the loop to log all upserts
+				// Store highest cursor as starting point for next batch
+				cursor = cursorType{appbutlerCursorDoc.RoutingChangedAt, doc.Ref.ID}
+				lastRef = doc.Ref.Path
+				updatedCursor = true
+			}
 
-				// Pull only data we need from doc
-				type AppbutlerCursorDoc struct {
-					ProjectID        string    `firestore:"projectId"`
-					RoutingChangedAt time.Time `firestore:"routingChangedAt"`
-				}
-				var appbutlerCursorDoc AppbutlerCursorDoc
-				if err := doc.DataTo(&appbutlerCursorDoc); err != nil {
-					// Shouldn't happen, we need to look at the doc here
-					hub := sentry.GetHubFromContext(ctx)
-					hub.WithScope(func(scope *sentry.Scope) {
-						scope.SetTag("appbutlerId", doc.Ref.ID)
-						scope.SetLevel(sentry.LevelError)
-						hub.CaptureException(err)
-					})
-					l.logger.Error(
-						"firestorelistener.listenByPolling failed to read cursor from doc",
-						zap.Error(err),
-						zap.String("appbutlerId", doc.Ref.ID),
-					)
-					// Skip this document
-					continue
-				}
-
-				if appbutlerCursorDoc.RoutingChangedAt.IsZero() {
-					// Shouldn't happen, we need to look at the doc here
-					err := errors.Errorf("RoutingChangedAt is zero, this should never happen")
-					hub := sentry.GetHubFromContext(ctx)
-					hub.WithScope(func(scope *sentry.Scope) {
-						scope.SetTag("appbutlerId", doc.Ref.ID)
-						scope.SetLevel(sentry.LevelError)
-						hub.CaptureException(err)
-					})
-					l.logger.Error(
-						"firestorelistener.listenByPolling read unexpected zero cursor from doc",
-						zap.Error(err),
-						zap.String("appbutlerId", doc.Ref.ID),
-						zap.String("projectId", appbutlerCursorDoc.ProjectID),
-					)
-					// Skip this document
-					continue
-				}
-
-				var updatedCursor bool
-				if cursor.ts.After(appbutlerCursorDoc.RoutingChangedAt) {
-					l.logger.Warn(
-						"firestorelistener.listenByPolling cursor is older than last upsert",
-						zap.String("lastRef", lastRef),
-						zap.Time("cursorTs", cursor.ts),
-						zap.String("cursorId", cursor.id),
-						zap.Time("appbutlerTs", appbutlerCursorDoc.RoutingChangedAt),
-						zap.String("appbutlerId", doc.Ref.ID),
-					)
-					updatedCursor = false
-				} else {
-					// Store highest cursor as starting point for next batch
-					cursor = cursorType{appbutlerCursorDoc.RoutingChangedAt, doc.Ref.ID}
-					lastRef = doc.Ref.Path
-					updatedCursor = true
-				}
-
+			if !first {
 				l.logger.Info(
 					"firestorelistener.listenByPolling updated service",
 					zap.String("projectId", appbutlerCursorDoc.ProjectID),

@@ -26,7 +26,7 @@ import (
 // Set a project id here for extra debugging logs in prod for just this one app
 const (
 	// LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
-	LOG_EXTRA_FOR_PROJECT_ID = ""
+	LOG_EXTRA_FOR_PROJECT_ID = "29b6d950-947f-44e3-a7b4-da91732bcbf2"
 )
 
 var EnableExtraDebugLogsForAllRequests = os.Getenv("ENABLE_EXTRA_DEBUG_LOGS_FOR_ALL_REQUESTS") == "true"

@@ -292,9 +292,11 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// - custom           custom.com                /api/* -> /_projects/{projectID}/dbtn/{serviceType}/app/routes/*
 
 	if projectID == "" {
+		// Can this happen? When?
+
 		// This means the URL is not _projects/...
 		// Get project id from domain lookup
-		if strings.HasSuffix(originHost, ".databutton.app") { // XXX
+		if strings.HasSuffix(originHost, ".databutton.app") {
 			// TODO: Case: username.databutton.app/appname/api/...
 			// originHost = username.databutton.app
 			// appnameHeader := r.Header.Get("X-Databutton-Appname")
@@ -329,6 +331,8 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			makeOriginalPath(projectID, serviceType, r.URL.Path),
 		)
 
+		r.Header.Set("X-Dbtn-Proxy-Case", "no-project-id")
+
 	} else if projectID == "8de60c46-e25f-45fe-8df7-b5dd8b7f3b4d" || projectID == "f752666e-efd8-455d-b42f-6738931207e7" {
 		// TODO: Add config for allowed origins to apps, special case for now
 		// extraAllowedOrigins := m.listener.LookupExtraAllowedOrigins(projectID, serviceType)
@@ -349,33 +353,61 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
-		} else if originHeader == "https://databutton.com" { // isDevx &&  // XXX
-			// TODO: Shouldn't prodx be disallowed here?
-			//       There was a reason for disabling the
-			//       isDevx check here but don't remember why!
-			//
-			// Devx is served from databutton.com
-			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-origin") // XXX
+		} else if originHeader == "https://databutton.com" {
+			if isDevx {
+				// The databutton dev workspace
+				r.Header.Set("X-Dbtn-Proxy-Case", "databutton-com-devx")
+				corsOrigin = originHeader
+			} else {
+				// Don't remember what case this is, does it happen that non-devx apps are called from databutton.com origin?
+				r.Header.Set("X-Dbtn-Proxy-Case", "databutton-com-prodx")
+				corsOrigin = originHeader
+			}
+		} else if isDevx && originHeader == "https://riff.hot" {
+			// The riff dev workspace
+			r.Header.Set("X-Dbtn-Proxy-Case", "riff-origin")
 			corsOrigin = originHeader
-		} else if originHeader == "https://riff.hot" { // isDevx &&  // XXX
-			// TODO: Shouldn't prodx be disallowed here?
-			//       There was a reason for disabling the
-			//       isDevx check here but don't remember why!
-			//
-			// Devx is served from databutton.com
-			r.Header.Set("X-Dbtn-Proxy-Case", "riff-origin") // XXX
-			corsOrigin = originHeader
-		} else if isProdx && strings.HasSuffix(originHost, ".databutton.app") { // XXX
-			// New style hosting at per-user subdomains
-			r.Header.Set("X-Dbtn-Proxy-Case", "user-subdomain")
+		} else if isProdx && strings.HasSuffix(originHost, ".rifftools.com") {
+			// Deployed riff apps on username.rifftools.com
+			r.Header.Set("X-Dbtn-Proxy-Case", "user-rifftools-com")
 
 			// Compare origin url username to app owner username
-			originUsername := strings.TrimSuffix(originHost, ".databutton.app") // XXX
+			originUsername := strings.TrimSuffix(originHost, ".rifftools.com")
 			ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
 			if originUsername == ownerUsername {
 				// Only set cors if username is owner of projectID
 				corsOrigin = originHeader
 			} else {
+				// Error handling case
+				msg := "The app being called is not owned by the username in the domain it's being called from"
+				m.logger.Error(msg,
+					zap.String("projectID", projectID),
+					zap.String("serviceType", serviceType),
+					zap.String("originHost", originHost),
+					zap.String("originUsername", originUsername),
+					zap.String("ownerUsername", ownerUsername),
+					zap.Bool("isDebugCase", enableExtraDebugLogs),
+				)
+				if r.Method == "OPTIONS" {
+					return m.writeErrorResponse(w, http.StatusNoContent, msg, map[string]string{
+						"Origin":      originHeader,
+						"ProjectID":   projectID,
+						"ServiceType": serviceType,
+					})
+				}
+			}
+		} else if isProdx && strings.HasSuffix(originHost, ".databutton.app") {
+			// Deployed databutton apps on username.databutton.app
+			r.Header.Set("X-Dbtn-Proxy-Case", "user-databutton-app")
+
+			// Compare origin url username to app owner username
+			originUsername := strings.TrimSuffix(originHost, ".databutton.app")
+			ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
+			if originUsername == ownerUsername {
+				// Only set cors if username is owner of projectID
+				corsOrigin = originHeader
+			} else {
+				// Error handling case
 				msg := "The app being called is not owned by the username in the domain it's being called from"
 				m.logger.Error(msg,
 					zap.String("projectID", projectID),
@@ -401,7 +433,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			corsOrigin = originHeader
 		} else {
 			// Call comes from outside our infra
-			r.Header.Set("X-Dbtn-Proxy-Case", "beyond-customdomain")
+			r.Header.Set("X-Dbtn-Proxy-Case", "customdomain")
 
 			// Get project id from domain lookup (for cors check only!)
 			originDomainProjectID := m.listener.ProjectIdForDomain(originHost)

@@ -1,6 +1,6 @@
 module github.com/databutton/data-app-dns-service
 
-go 1.24.2
+go 1.25
 
 require (
 	cloud.google.com/go/firestore v1.18.0

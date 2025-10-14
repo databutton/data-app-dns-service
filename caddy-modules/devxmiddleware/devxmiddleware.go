@@ -363,7 +363,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				r.Header.Set("X-Dbtn-Proxy-Case", "databutton-com-prodx")
 				corsOrigin = originHeader
 			}
-		} else if isDevx && originHeader == "https://riff.hot" {
+		} else if isDevx && originHeader == "https://useriff.ai" {
 			// The riff dev workspace
 			r.Header.Set("X-Dbtn-Proxy-Case", "riff-origin")
 			corsOrigin = originHeader

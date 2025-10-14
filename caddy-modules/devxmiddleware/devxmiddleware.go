@@ -363,13 +363,18 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				r.Header.Set("X-Dbtn-Proxy-Case", "databutton-com-prodx")
 				corsOrigin = originHeader
 			}
-		} else if isDevx && originHeader == "https://useriff.ai" {
+		} else if isDevx && (originHeader == "https://useriff.ai" || originHeader == "https://riff.hot") {
 			// The riff dev workspace
 			r.Header.Set("X-Dbtn-Proxy-Case", "riff-origin")
 			corsOrigin = originHeader
-		} else if isProdx && strings.HasSuffix(originHost, ".rifftools.com") {
-			// Deployed riff apps on username.rifftools.com
-			r.Header.Set("X-Dbtn-Proxy-Case", "user-rifftools-com")
+		} else if isProdx && (strings.HasSuffix(originHost, ".riff.works") || strings.HasSuffix(originHost, ".rifftools.com")) {
+			if strings.HasSuffix(originHost, ".riff.works") {
+				// Deployed riff apps on username.riff.works
+				r.Header.Set("X-Dbtn-Proxy-Case", "user-riff-works")
+			} else if strings.HasSuffix(originHost, ".rifftools.com") {
+				// Deployed riff apps on username.rifftools.com
+				r.Header.Set("X-Dbtn-Proxy-Case", "user-rifftools-com")
+			}
 
 			// Compare origin url username to app owner username
 			originUsername := strings.TrimSuffix(originHost, ".rifftools.com")

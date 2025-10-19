@@ -350,6 +350,16 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		isDevx := serviceType == "devx"
 		isProdx := serviceType == "prodx"
 
+		prodxSuffixes := []string{".riff.works", ".rifftools.com", ".databutton.app"}
+		prodxSuffixIndex := -1
+		if isProdx {
+			prodxSuffixIndex = slices.IndexFunc(
+				prodxSuffixes,
+				func(suffix string) bool {
+					return strings.HasSuffix(originHost, suffix)
+				})
+		}
+
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
@@ -367,17 +377,26 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			// The riff dev workspace
 			r.Header.Set("X-Dbtn-Proxy-Case", "riff-origin")
 			corsOrigin = originHeader
-		} else if isProdx && (strings.HasSuffix(originHost, ".riff.works") || strings.HasSuffix(originHost, ".rifftools.com")) {
-			if strings.HasSuffix(originHost, ".riff.works") {
+		} else if isProdx && prodxSuffixIndex >= 0 {
+			suffix := prodxSuffixes[prodxSuffixIndex]
+
+			switch suffix {
+			case ".riff.works":
 				// Deployed riff apps on username.riff.works
 				r.Header.Set("X-Dbtn-Proxy-Case", "user-riff-works")
-			} else if strings.HasSuffix(originHost, ".rifftools.com") {
+				break
+			case ".rifftools.com":
 				// Deployed riff apps on username.rifftools.com
 				r.Header.Set("X-Dbtn-Proxy-Case", "user-rifftools-com")
+				break
+			case ".databutton.app":
+				// Deployed riff apps on username.rifftools.com
+				r.Header.Set("X-Dbtn-Proxy-Case", "user-databutton-app")
+				break
 			}
 
 			// Compare origin url username to app owner username
-			originUsername := strings.TrimSuffix(originHost, ".rifftools.com")
+			originUsername := strings.TrimSuffix(originHost, suffix)
 			ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
 			if originUsername == ownerUsername {
 				// Only set cors if username is owner of projectID
@@ -389,35 +408,7 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					zap.String("projectID", projectID),
 					zap.String("serviceType", serviceType),
 					zap.String("originHost", originHost),
-					zap.String("originUsername", originUsername),
-					zap.String("ownerUsername", ownerUsername),
-					zap.Bool("isDebugCase", enableExtraDebugLogs),
-				)
-				if r.Method == "OPTIONS" {
-					return m.writeErrorResponse(w, http.StatusNoContent, msg, map[string]string{
-						"Origin":      originHeader,
-						"ProjectID":   projectID,
-						"ServiceType": serviceType,
-					})
-				}
-			}
-		} else if isProdx && strings.HasSuffix(originHost, ".databutton.app") {
-			// Deployed databutton apps on username.databutton.app
-			r.Header.Set("X-Dbtn-Proxy-Case", "user-databutton-app")
-
-			// Compare origin url username to app owner username
-			originUsername := strings.TrimSuffix(originHost, ".databutton.app")
-			ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
-			if originUsername == ownerUsername {
-				// Only set cors if username is owner of projectID
-				corsOrigin = originHeader
-			} else {
-				// Error handling case
-				msg := "The app being called is not owned by the username in the domain it's being called from"
-				m.logger.Error(msg,
-					zap.String("projectID", projectID),
-					zap.String("serviceType", serviceType),
-					zap.String("originHost", originHost),
+					zap.String("originHostSuffix", suffix),
 					zap.String("originUsername", originUsername),
 					zap.String("ownerUsername", ownerUsername),
 					zap.Bool("isDebugCase", enableExtraDebugLogs),

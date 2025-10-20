@@ -26,10 +26,24 @@ import (
 // Set a project id here for extra debugging logs in prod for just this one app
 const (
 	// LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
-	LOG_EXTRA_FOR_PROJECT_ID = "29b6d950-947f-44e3-a7b4-da91732bcbf2"
+	// LOG_EXTRA_FOR_PROJECT_ID = "29b6d950-947f-44e3-a7b4-da91732bcbf2"
+	LOG_EXTRA_FOR_PROJECT_ID = ""
 )
 
 var EnableExtraDebugLogsForAllRequests = os.Getenv("ENABLE_EXTRA_DEBUG_LOGS_FOR_ALL_REQUESTS") == "true"
+
+var prodxRootDomains = []string{
+	".riff.works",
+	".rifftools.com",
+	".databutton.app",
+}
+
+var workspaceDomains = []string{
+	"https://riff.new",
+	"https://useriff.ai",
+	"https://riff.hot",
+	"https://databutton.com",
+}
 
 type LookerUper interface {
 	ProjectIdForDomain(domain string) string
@@ -350,84 +364,84 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 		isDevx := serviceType == "devx"
 		isProdx := serviceType == "prodx"
 
-		prodxSuffixes := []string{".riff.works", ".rifftools.com", ".databutton.app"}
-		prodxSuffixIndex := -1
-		if isProdx {
-			prodxSuffixIndex = slices.IndexFunc(
-				prodxSuffixes,
-				func(suffix string) bool {
-					return strings.HasSuffix(originHost, suffix)
-				})
-		}
-
+		matched := false
 		if originHeader == "" {
 			// Same-domain requests, requests from backends, etc, never set cors
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
-		} else if originHeader == "https://databutton.com" {
-			if isDevx {
-				// The databutton dev workspace
-				r.Header.Set("X-Dbtn-Proxy-Case", "databutton-com-devx")
-				corsOrigin = originHeader
-			} else {
-				// Don't remember what case this is, does it happen that non-devx apps are called from databutton.com origin?
-				r.Header.Set("X-Dbtn-Proxy-Case", "databutton-com-prodx")
-				corsOrigin = originHeader
-			}
-		} else if isDevx && (originHeader == "https://useriff.ai" || originHeader == "https://riff.hot") {
-			// The riff dev workspace
-			r.Header.Set("X-Dbtn-Proxy-Case", "riff-origin")
+			corsOrigin = ""
+			matched = true
+		} else if isProdx && originHeader == "https://databutton.com" {
+			// Special case kept for backwards compatibility. May be irrelevant, but test before removing.
+			// Don't remember what case this is, does it happen that non-devx apps are called from databutton.com origin?
+			r.Header.Set("X-Dbtn-Proxy-Case", "databutton-com-prodx")
 			corsOrigin = originHeader
-		} else if isProdx && prodxSuffixIndex >= 0 {
-			suffix := prodxSuffixes[prodxSuffixIndex]
+			matched = true
+		} else if isProdx {
+			// TODO: Maybe a regex would be better here
+			prodxRootDomainsIndex := slices.IndexFunc(
+				prodxRootDomains,
+				func(suffix string) bool {
+					return strings.HasSuffix(originHost, suffix)
+				})
+			if prodxRootDomainsIndex >= 0 {
+				prodxRootDomain := prodxRootDomains[prodxRootDomainsIndex]
 
-			switch suffix {
-			case ".riff.works":
-				// Deployed riff apps on username.riff.works
-				r.Header.Set("X-Dbtn-Proxy-Case", "user-riff-works")
-				break
-			case ".rifftools.com":
-				// Deployed riff apps on username.rifftools.com
-				r.Header.Set("X-Dbtn-Proxy-Case", "user-rifftools-com")
-				break
-			case ".databutton.app":
-				// Deployed riff apps on username.rifftools.com
-				r.Header.Set("X-Dbtn-Proxy-Case", "user-databutton-app")
-				break
-			}
+				// This header is just a debugging tool, not currently used by anything
+				// E.g. user-riff-works, user-rifftools-com, user-databutton-app
+				r.Header.Set("X-Dbtn-Proxy-Case", "user"+strings.ReplaceAll(prodxRootDomain, ".", "-"))
 
-			// Compare origin url username to app owner username
-			originUsername := strings.TrimSuffix(originHost, suffix)
-			ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
-			if originUsername == ownerUsername {
-				// Only set cors if username is owner of projectID
-				corsOrigin = originHeader
-			} else {
-				// Error handling case
-				msg := "The app being called is not owned by the username in the domain it's being called from"
-				m.logger.Error(msg,
-					zap.String("projectID", projectID),
-					zap.String("serviceType", serviceType),
-					zap.String("originHost", originHost),
-					zap.String("originHostSuffix", suffix),
-					zap.String("originUsername", originUsername),
-					zap.String("ownerUsername", ownerUsername),
-					zap.Bool("isDebugCase", enableExtraDebugLogs),
-				)
-				if r.Method == "OPTIONS" {
-					return m.writeErrorResponse(w, http.StatusNoContent, msg, map[string]string{
-						"Origin":      originHeader,
-						"ProjectID":   projectID,
-						"ServiceType": serviceType,
-					})
+				// Compare origin url username to app owner username
+				originUsername := strings.TrimSuffix(originHost, prodxRootDomain)
+				ownerUsername := m.listener.UsernameForProject(projectID, serviceType)
+				if originUsername == ownerUsername {
+					// Only set cors if username is owner of projectID
+					corsOrigin = originHeader
+					matched = true
+				} else {
+					// Error handling case
+					msg := "The app being called is not owned by the username in the domain it's being called from"
+					m.logger.Error(msg,
+						zap.String("projectID", projectID),
+						zap.String("serviceType", serviceType),
+						zap.String("originHost", originHost),
+						zap.String("originHostSuffix", prodxRootDomain),
+						zap.String("originUsername", originUsername),
+						zap.String("ownerUsername", ownerUsername),
+						zap.Bool("isDebugCase", enableExtraDebugLogs),
+					)
+					if r.Method == "OPTIONS" {
+						return m.writeErrorResponse(w, http.StatusNoContent, msg, map[string]string{
+							"Origin":      originHeader,
+							"ProjectID":   projectID,
+							"ServiceType": serviceType,
+						})
+					}
 				}
 			}
-		} else if isDevx && strings.HasPrefix(originHost, "localhost") {
-			// Call comes from localhost, i.e. running webapp locally
-			r.Header.Set("X-Dbtn-Proxy-Case", "localhost-for-dev")
-			// TODO: This would not be necessary if vite proxies
-			//       were set up to set Origin to https://databutton.com
-			corsOrigin = originHeader
-		} else {
+		} else if isDevx {
+			// The riff dev workspace behind misc domains
+			for _, workspaceDomain := range workspaceDomains {
+				if originHeader == workspaceDomain {
+					r.Header.Set("X-Dbtn-Proxy-Case", "workspace")
+					corsOrigin = originHeader
+					matched = true
+					break
+				}
+			}
+
+			if !matched && strings.HasPrefix(originHost, "localhost") {
+				// Call comes from localhost, i.e. running webapp locally
+				r.Header.Set("X-Dbtn-Proxy-Case", "localhost-for-dev")
+				// TODO: This would not be necessary if vite proxies
+				//       were set up to set Origin to https://databutton.com
+				corsOrigin = originHeader
+				matched = true
+			}
+		}
+
+		// This is checked for both devx and prodx, is that a bug or is there a corner case?
+		// May be irrelevant for devx, but test before removing.
+		if !matched {
 			// Call comes from outside our infra
 			r.Header.Set("X-Dbtn-Proxy-Case", "customdomain")
 
@@ -435,8 +449,9 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			originDomainProjectID := m.listener.ProjectIdForDomain(originHost)
 			if originDomainProjectID == projectID {
 				// Set cors if project found for this domain and header and origin matches
-				corsOrigin = originHeader
 				customDomain = originHost
+				corsOrigin = originHeader
+				matched = true
 			} else {
 				// Don't set cors if different or no project found for this domain
 				msg := "Origin domain is not associated with the app being called"

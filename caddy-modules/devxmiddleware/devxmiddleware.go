@@ -25,9 +25,9 @@ import (
 
 // Set a project id here for extra debugging logs in prod for just this one app
 const (
-	// LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
-	// LOG_EXTRA_FOR_PROJECT_ID = "29b6d950-947f-44e3-a7b4-da91732bcbf2"
-	LOG_EXTRA_FOR_PROJECT_ID = "tight-turbulent-carillon-sns4"
+// LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
+// LOG_EXTRA_FOR_PROJECT_ID = "29b6d950-947f-44e3-a7b4-da91732bcbf2"
+// LOG_EXTRA_FOR_PROJECT_ID = "tight-turbulent-carillon-sns4"
 )
 
 var EnableExtraDebugLogsForAllRequests = os.Getenv("ENABLE_EXTRA_DEBUG_LOGS_FOR_ALL_REQUESTS") == "true"
@@ -238,6 +238,11 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 	// Enable extra debugging logs for a specific app while keeping a minimal overhead for all other requests
 	enableExtraDebugLogs := (projectID == LOG_EXTRA_FOR_PROJECT_ID && LOG_EXTRA_FOR_PROJECT_ID != "") || EnableExtraDebugLogsForAllRequests
+
+	if enableExtraDebugLogs {
+		r.Header.Set("X-Dbtn-Debugging-Case", "yes")
+	}
+
 	if enableExtraDebugLogs {
 		m.logger.Warn("DEBUGGING: TOP OF DEVX MIDDLEWARE", zap.String("projectID", projectID),
 			zap.String("serviceType", serviceType),
@@ -371,7 +376,11 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			corsOrigin = ""
 			matched = true
 			if enableExtraDebugLogs {
-				m.logger.Info("devxmiddleware: matched no origin")
+				m.logger.Info(
+					"devxmiddleware: matched no origin",
+					zap.String("Origin", originHeader),
+					zap.Bool("isDebugCase", enableExtraDebugLogs),
+				)
 			}
 		} else if isProdx && originHeader == "https://databutton.com" {
 			// Special case kept for backwards compatibility. May be irrelevant, but test before removing.
@@ -429,7 +438,11 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					corsOrigin = originHeader
 					matched = true
 					if enableExtraDebugLogs {
-						m.logger.Info("devxmiddleware: matched workspace")
+						m.logger.Info(
+							"devxmiddleware: matched workspace",
+							zap.String("Origin", originHeader),
+							zap.Bool("isDebugCase", enableExtraDebugLogs),
+						)
 					}
 					break
 				}
@@ -443,7 +456,11 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				corsOrigin = originHeader
 				matched = true
 				if enableExtraDebugLogs {
-					m.logger.Info("devxmiddleware: matched localhost")
+					m.logger.Info(
+						"devxmiddleware: matched localhost",
+						zap.String("Origin", originHeader),
+						zap.Bool("isDebugCase", enableExtraDebugLogs),
+					)
 				}
 			}
 		}

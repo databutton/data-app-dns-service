@@ -27,7 +27,7 @@ import (
 const (
 	// LOG_EXTRA_FOR_PROJECT_ID = "eadb6129-8fca-4866-b572-d2f9bcbc1146"
 	// LOG_EXTRA_FOR_PROJECT_ID = "29b6d950-947f-44e3-a7b4-da91732bcbf2"
-	LOG_EXTRA_FOR_PROJECT_ID = ""
+	LOG_EXTRA_FOR_PROJECT_ID = "tight-turbulent-carillon-sns4"
 )
 
 var EnableExtraDebugLogsForAllRequests = os.Getenv("ENABLE_EXTRA_DEBUG_LOGS_FOR_ALL_REQUESTS") == "true"
@@ -370,6 +370,9 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 			r.Header.Set("X-Dbtn-Proxy-Case", "no-origin")
 			corsOrigin = ""
 			matched = true
+			if enableExtraDebugLogs {
+				m.logger.Info("devxmiddleware: matched no origin")
+			}
 		} else if isProdx && originHeader == "https://databutton.com" {
 			// Special case kept for backwards compatibility. May be irrelevant, but test before removing.
 			// Don't remember what case this is, does it happen that non-devx apps are called from databutton.com origin?
@@ -425,6 +428,9 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					r.Header.Set("X-Dbtn-Proxy-Case", "workspace")
 					corsOrigin = originHeader
 					matched = true
+					if enableExtraDebugLogs {
+						m.logger.Info("devxmiddleware: matched workspace")
+					}
 					break
 				}
 			}
@@ -436,6 +442,9 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				//       were set up to set Origin to https://databutton.com
 				corsOrigin = originHeader
 				matched = true
+				if enableExtraDebugLogs {
+					m.logger.Info("devxmiddleware: matched localhost")
+				}
 			}
 		}
 
@@ -452,6 +461,10 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 				customDomain = originHost
 				corsOrigin = originHeader
 				matched = true
+
+				if enableExtraDebugLogs {
+					m.logger.Info("devxmiddleware: matched projectid for domain")
+				}
 			} else {
 				// Don't set cors if different or no project found for this domain
 				msg := "Origin domain is not associated with the app being called"
@@ -472,6 +485,10 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 					})
 				}
 			}
+		}
+
+		if !matched && enableExtraDebugLogs {
+			m.logger.Info("devxmiddleware: not matched")
 		}
 	}
 

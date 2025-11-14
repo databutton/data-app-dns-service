@@ -3,6 +3,7 @@ package storelistener
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,12 @@ var _ caddy.Destructor = (*Listener)(nil)
 // Note: If this panics we want it to blow up the service
 func (l *Listener) Start(firstSyncDone func()) {
 	l.logger.Info("firestorelistener.Start")
+
+	if os.Getenv("DISABLE_FIRESTORE_LISTENER") == "true" {
+		l.logger.Info("firestorelistener.Start DISABLE_FIRESTORE_LISTENER is set, skipping")
+		firstSyncDone()
+		return
+	}
 
 	go l.retryForever(l.ctx, firstSyncDone)
 }

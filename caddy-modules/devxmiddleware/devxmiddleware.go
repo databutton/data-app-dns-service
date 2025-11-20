@@ -311,7 +311,14 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 	// - databutton.app   username.databutton.app   /appname/api/* -> /_projects/{projectID}/dbtn/{serviceType}/app/routes/*
 	// - custom           custom.com                /api/* -> /_projects/{projectID}/dbtn/{serviceType}/app/routes/*
 
-	if projectID == "" {
+	if projectID == "null" {
+		msg := "ProjectID is \"null\", this is likely from a misconfigured custom domain setup."
+		return m.writeErrorResponse(w, http.StatusBadRequest, msg, map[string]string{
+			"Origin":      originHeader,
+			"ProjectID":   projectID,
+			"ServiceType": serviceType,
+		})
+	} else if projectID == "" {
 		// Can this happen? When?
 
 		// This means the URL is not _projects/...

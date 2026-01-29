@@ -563,7 +563,12 @@ func (m *DevxMiddlewareModule) ServeHTTP(w http.ResponseWriter, r *http.Request,
 
 	if hub != nil {
 		hub.ConfigureScope(func(scope *sentry.Scope) {
-			scope.SetTag("UpstreamHost", upstream)
+			scope.SetTag("upstream", upstream)
+			scope.SetTag("project_id", projectID)
+			scope.SetTag("service_type", serviceType)
+			if customDomain != "" {
+				scope.SetTag("custom_domain", customDomain)
+			}
 		})
 	}
 

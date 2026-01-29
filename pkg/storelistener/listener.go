@@ -117,12 +117,7 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 	l.logger.Info("firestorelistener.retryForever")
 
 	hub := sentry.GetHubFromContext(ctx)
-	hub.CaptureMessage("about to enter listenToSnapshots loop, logging sentry event to confirm it gets through") // OBSERVED
-	defer func() {
-		l.logger.Error("firestorelistener.retryForever exiting")             // NOT OBSERVED
-		hub.CaptureMessage("listenToSnapshots returning, canceled or panic") // NOT OBSERVED
-		sentry.Flush(2 * time.Second)
-	}()
+	defer sentry.Flush(2 * time.Second)
 
 	// - If time since last restart is < 60 seconds, count restarts
 	// - If restarts > 5, die to restart service

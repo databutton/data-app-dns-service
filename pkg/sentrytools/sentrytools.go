@@ -18,7 +18,8 @@ func InitSentry() error {
 		err = sentry.Init(sentry.ClientOptions{
 			Dsn:              SENTRY_DSN,
 			Release:          os.Getenv("DATA_APP_DNS_RELEASE"),
-			TracesSampleRate: SENTRY_TRACES_SAMPLE_RATE,
+			EnableTracing:    true,
+			TracesSampleRate: 0.0001,
 		})
 	})
 	return err

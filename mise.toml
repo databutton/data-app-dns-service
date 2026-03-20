@@ -1,0 +1,28 @@
+[tools]
+golang = "1.25"
+
+[tasks.format]
+description = "Format code"
+run = "go fmt ./..."
+
+[tasks.lint]
+description = "Lint code"
+run = "go vet ./..."
+
+[tasks.test]
+description = "Run tests"
+run = "go test ./..."
+
+[tasks.build]
+description = "Build custom caddy"
+dir = "run"
+run = "xcaddy build --with github.com/lolPants/caddy-requestid --with github.com/databutton/data-app-dns-service=../"
+
+[tasks.start]
+description = "Start locally built caddy"
+run = "./run/caddy run --config ./run/Caddyfile"
+
+[tasks.dev]
+description = "Build and start"
+depends = ["build"]
+run = "./run/caddy run --config ./run/Caddyfile"

@@ -2,30 +2,10 @@ package threadsafemap
 
 import (
 	"fmt"
-	"maps"
 	"sync"
 	"testing"
 	"time"
 )
-
-func TestMapClone(t *testing.T) {
-	data := make(map[int]string)
-	data1 := maps.Clone(data)
-	if data1 == nil {
-		t.Log("data1 is nil")
-		t.Fail()
-	}
-
-	var data2 map[int]string
-	data3 := maps.Clone(data2)
-	if data3 == nil {
-		t.Log("data3 is nil")
-		t.Fail()
-	}
-
-	t.Log("Got to the end")
-	t.Fail()
-}
 
 func TestThreadSafeMap(t *testing.T) {
 	// Create a new thread-safe map
@@ -51,7 +31,7 @@ func TestThreadSafeMap(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
 				key := fmt.Sprintf("key_%d_%d", id, j)
-				tsm.Set(key, id*10+j)
+				tsm.SetAsync(key, id*10+j)
 			}
 		}(i)
 	}
@@ -87,7 +67,7 @@ func TestThreadSafeMap(t *testing.T) {
 
 	t0 := time.Now()
 	for i := range 100 * 1000 {
-		tsm.Set(fmt.Sprintf("key_%d", i), i)
+		tsm.SetAsync(fmt.Sprintf("key_%d", i), i)
 	}
 	t1 := time.Now()
 	fmt.Printf("Set took %v\n", t1.Sub(t0)) // 32 ms

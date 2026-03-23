@@ -1,3 +1,4 @@
+// Package threadsafemap implements a threadsafe map with nonblocking writes.
 package threadsafemap
 
 import (
@@ -56,7 +57,7 @@ func (tsm *Map[K, V]) Get(key K) (V, bool) {
 	return value, ok
 }
 
-// Set adds or updates a key-value pair in the map asynchronously
+// SetAsync adds or updates a key-value pair in the map asynchronously
 func (tsm *Map[K, V]) SetAsync(key K, value V) {
 	select {
 	case tsm.writeCh <- writeOp[K, V]{key: key, value: value}:
@@ -78,7 +79,7 @@ func (tsm *Map[K, V]) SetSync(key K, value V) {
 	}
 }
 
-// Delete removes a key from the map asynchronously
+// DeleteAsync removes a key from the map asynchronously
 func (tsm *Map[K, V]) DeleteAsync(key K) {
 	var zero V
 	select {

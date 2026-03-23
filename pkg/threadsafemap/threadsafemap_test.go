@@ -25,11 +25,11 @@ func TestThreadSafeMap(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Start multiple goroutines writing to the map
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < 10; j++ {
+			for j := range 10 {
 				key := fmt.Sprintf("key_%d_%d", id, j)
 				tsm.SetAsync(key, id*10+j)
 			}
@@ -37,11 +37,11 @@ func TestThreadSafeMap(t *testing.T) {
 	}
 
 	// Start multiple goroutines reading from the map
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < 20; j++ {
+			for j := range 20 {
 				key := fmt.Sprintf("key_%d_%d", j%5, j%10)
 				if value, ok := tsm.Get(key); ok {
 					fmt.Printf("Reader %d found %s: %d\n", id, key, value)

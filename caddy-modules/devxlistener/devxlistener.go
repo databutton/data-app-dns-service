@@ -5,6 +5,7 @@ package devxlistener
 
 import (
 	"context"
+	"os"
 	"sync"
 	"time"
 
@@ -12,14 +13,19 @@ import (
 	"github.com/databutton/data-app-dns-service/pkg/sentrytools"
 	"github.com/databutton/data-app-dns-service/pkg/storelistener"
 	"github.com/getsentry/sentry-go"
+	"github.com/mixpanel/mixpanel-go"
+	segment "github.com/segmentio/analytics-go"
 	"go.uber.org/zap"
 )
 
 type ListenerModule struct {
 	// Internal state
-	ctx                context.Context
-	cancel             context.CancelFunc
-	logger             *zap.Logger
+	ctx            context.Context
+	cancel         context.CancelFunc
+	logger         *zap.Logger
+	mixpanelClient *mixpanel.ApiClient
+	segmentClient  segment.Client
+
 	hub                *sentry.Hub
 	listener           *storelistener.Listener
 	waitForInitialLoad func()
@@ -68,6 +74,21 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 		scope.SetTag("provisioningStartedAt", time.Now().UTC().Format(time.RFC3339))
 	})
 
+	// Create a mixpanel client
+	mixpanelApiKey := os.Getenv("MIXPANEL_API_KEY")
+	if mixpanelApiKey != "" {
+		m.mixpanelClient = mixpanel.NewApiClient(mixpanelApiKey)
+	}
+
+	// Create a segment client
+	segmentApiKey := os.Getenv("SEGMENT_API_KEY")
+	if segmentApiKey != "" {
+		m.segmentClient, _ = segment.NewWithConfig(segmentApiKey, segment.Config{
+			BatchSize: 100,
+			Interval:  5 * time.Second,
+		})
+	}
+
 	// Create and start listener background process
 	initWg := new(sync.WaitGroup)
 	initWg.Add(1)
@@ -100,6 +121,8 @@ func (m *ListenerModule) startListener(firstSyncDone func()) (*storelistener.Lis
 	listener, err := storelistener.NewFirestoreListener(
 		ctx,
 		m.logger,
+		m.mixpanelClient,
+		m.segmentClient,
 	)
 	if err != nil {
 		return nil, err
@@ -136,6 +159,7 @@ func (m *ListenerModule) Validate() error {
 func (m *ListenerModule) Cleanup() error {
 	m.logger.Info("devxlistener: Cleanup")
 	m.cancel()
+	defer m.segmentClient.Close()
 	// Flush buffered events before the program terminates.
 	sentry.Flush(2 * time.Second)
 	return nil

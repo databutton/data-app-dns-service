@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,8 +11,11 @@ import (
 
 	"cloud.google.com/go/firestore"
 	"github.com/caddyserver/caddy/v2"
+	"github.com/databutton/data-app-dns-service/pkg/tracking"
 	"github.com/getsentry/sentry-go"
+	"github.com/mixpanel/mixpanel-go"
 	"github.com/pkg/errors"
+	segment "github.com/segmentio/analytics-go"
 	"go.uber.org/zap"
 )
 
@@ -34,18 +36,24 @@ type Listener struct {
 	cancel          context.CancelFunc
 	firestoreClient *firestore.Client
 	logger          *zap.Logger
+	mixpanelClient  *mixpanel.ApiClient
+	segmentClient   segment.Client
 
 	failureBucket         *atomic.Int64
 	failedProjects        *sync.Map
 	restartCount          *atomic.Int64
 	lastCheckFailuresTime *atomic.Int64
-	lastRestartTime       *atomic.Int64
 
 	infra      *InfraProjection
 	infraMutex sync.RWMutex
 }
 
-func NewFirestoreListener(ctx context.Context, logger *zap.Logger) (*Listener, error) {
+func NewFirestoreListener(
+	ctx context.Context,
+	logger *zap.Logger,
+	mixpanelClient *mixpanel.ApiClient,
+	segmentClient segment.Client,
+) (*Listener, error) {
 	client, err := firestore.NewClient(context.Background(), GCP_PROJECT)
 	if err != nil {
 		return nil, err
@@ -59,18 +67,18 @@ func NewFirestoreListener(ctx context.Context, logger *zap.Logger) (*Listener, e
 		cancel:          cancel,
 		firestoreClient: client,
 		logger:          logger,
+		mixpanelClient:  mixpanelClient,
+		segmentClient:   segmentClient,
 
 		failureBucket:         new(atomic.Int64),
 		failedProjects:        new(sync.Map),
 		restartCount:          new(atomic.Int64),
 		lastCheckFailuresTime: new(atomic.Int64),
-		lastRestartTime:       new(atomic.Int64),
 
 		infra: NewInfraProjection(),
 	}
 
 	l.lastCheckFailuresTime.Store(time.Now().UnixMilli())
-	l.lastRestartTime.Store(time.Now().UnixMilli())
 
 	return l, nil
 }
@@ -106,8 +114,16 @@ func (l *Listener) Start(firstSyncDone func()) {
 
 func (l *Listener) DieNow() {
 	l.cancel()
+
+	// Wait for sentry to flush pending events
 	sentry.Flush(2 * time.Second)
+
+	// Checked 2026-03-23 the last 30 days, no matches to this error, however that could be because it wasn't flushed?
 	l.logger.Fatal("KILLING SERVICE FROM LISTENER")
+
+	// Flush the logger before we die
+	l.logger.Core().Sync()
+
 	// I don't think we get past the fatal log
 	panic(ErrUnalivingService)
 }
@@ -119,49 +135,48 @@ func (l *Listener) retryForever(ctx context.Context, firstSyncDone func()) {
 	hub := sentry.GetHubFromContext(ctx)
 	defer sentry.Flush(2 * time.Second)
 
-	// - If time since last restart is < 60 seconds, count restarts
-	// - If restarts > 5, die to restart service
+	totalStartCount := 0
 	restartCount := 0
 
 	// Loop until canceled
 	for ctx.Err() == nil {
-		l.lastRestartTime.Store(time.Now().UnixMilli())
+		totalStartCount++
 
-		err := l.listenByPolling(ctx, firstSyncDone)
+		lastRestartTime := time.Now()
 
-		if err != nil {
-			l.logger.Error("listenToSnapshots returned error", zap.Error(err))         // NOT OBSERVED
-			hub.CaptureException(errors.Wrap(err, "listenToSnapshots returned error")) // NOT OBSERVED
+		// Run listener polling loop, can run "forever" in principle
+		if err := l.listenByPolling(ctx, firstSyncDone); err != nil {
+			l.logger.Error("listenToSnapshots returned error", zap.Error(err))
 		} else {
-			l.logger.Error("listenToSnapshots returned without error")     // NOT OBSERVED
-			hub.CaptureMessage("listenToSnapshots returned without error") // NOT OBSERVED
+			l.logger.Error("listenToSnapshots returned without error")
 		}
 
-		// If the listener has worked for some time,
-		// just reset and restart right away with no delay
-		const acceptableRestartPeriod = 5 * time.Minute
-		timeSince := time.Since(time.UnixMilli(l.lastRestartTime.Load()))
-		if timeSince > acceptableRestartPeriod {
+		// Count how many times the polling has returned in a short time scale,
+		// and reset to 0 if it has worked for a while
+		if time.Since(lastRestartTime) < 5*time.Minute {
+			restartCount++
+		} else {
 			restartCount = 0
-			l.logger.Error("restarting listenToSnapshots immediately")     // NOT OBSERVED
-			hub.CaptureMessage("restarting listenToSnapshots immediately") // NOT OBSERVED
-			continue
 		}
 
-		// As long as we're looking at more rapid restarts, let the counter run
-		restartCount++
-		// and if we get a lot of them just die
-		if restartCount > 10 {
+		// If we get too many rapid restarts, just die
+		if restartCount > 6 {
 			// Not expecting this to happen a lot so we should ideally never get here,
 			// but if firestore connections are rotten or something then a forceful
-			// full service restart may be better
-			hub.CaptureException(ErrSnapshotListenerFailed) // NOT OBSERVED
+			// full service restart may be better than trying to restart in the same process
+			hub.CaptureException(ErrSnapshotListenerFailed)
 			l.DieNow()
 		}
 
-		// Don't restart too quickly
-		l.logger.Warn("firestorelistener.retryForever sleeping before next listenToSnapshots attempt", zap.Int("restartCount", restartCount))
-		time.Sleep(time.Second)
+		// Wait a little between restarts, 0.2s ... 1.2s = total less than 5s
+		waitDuration := time.Duration(restartCount*200) * time.Millisecond
+		l.logger.Warn(
+			"firestorelistener.retryForever sleeping before next listenToSnapshots attempt",
+			zap.Duration("waitDuration", waitDuration),
+			zap.Int("restartCount", restartCount),
+			zap.Int("totalStartCount", totalStartCount),
+		)
+		time.Sleep(waitDuration)
 	}
 }
 
@@ -404,53 +419,6 @@ func kindAsString(kind firestore.DocumentChangeKind) string {
 	return "unknown"
 }
 
-// processSnapshot modifies infra projection with changes from snapshot,
-// logging errors and returning the number of errors
-func (l *Listener) processSnapshot(ctx context.Context, infra *InfraProjection, snap *firestore.QuerySnapshot) (int, int) {
-	if DEBUGGING {
-		l.logger.Info("processSnapshot")
-	}
-
-	errorCount := 0
-	for i, change := range snap.Changes {
-		var err error
-		switch change.Kind {
-		case firestore.DocumentAdded, firestore.DocumentModified:
-			err = infra.UpsertForSnapshotListener(change.Doc)
-		case firestore.DocumentRemoved:
-			err = infra.RemoveForSnapshotListener(change.Doc)
-		default:
-			panic("Invalid change kind")
-		}
-
-		if DEBUGGING {
-			l.logger.Info(
-				"processSnapshot.change",
-				zap.String("kind", kindAsString(change.Kind)),
-				zap.String("path", change.Doc.Ref.Path),
-				zap.Error(err),
-			)
-		}
-
-		// If processing one document fails, notify on sentry
-		if err != nil {
-			errorCount += 1
-			l.logger.Error("Processing docucment change", zap.Error(err), zap.Int("errorsInBatch", errorCount))
-			hub := sentry.GetHubFromContext(ctx)
-			hub.WithScope(func(scope *sentry.Scope) {
-				scope.SetTag("kind", kindAsString(change.Kind))
-				scope.SetTag("ref", change.Doc.Ref.Path)
-				scope.SetTag("docIndex", strconv.Itoa(i))
-				scope.SetTag("failedSoFar", strconv.Itoa(errorCount))
-				scope.SetLevel(sentry.LevelError)
-				hub.CaptureException(err)
-			})
-		}
-	}
-
-	return len(snap.Changes), errorCount
-}
-
 func (l *Listener) SetInfra(infra *InfraProjection) {
 	l.infraMutex.Lock()
 	defer l.infraMutex.Unlock()
@@ -472,7 +440,7 @@ func (l *Listener) UpstreamForProject(ctx context.Context, projectID, serviceTyp
 	}
 
 	// Try a single lookup to see if it's just a temporary failure
-	// TODO: Rate limit these lookups and perhaps blacklist projects that don't get anywhere.
+	// FIXME: Rate limit these lookups and perhaps blacklist projects that don't get anywhere.
 	time.Sleep(time.Second)
 	if err := l.doSingleLookup(ctx, projectID, serviceType); err == nil {
 		service, ok := l.GetInfra().GetService(projectID, serviceType)
@@ -514,21 +482,68 @@ func (l *Listener) ProjectIdForDomain(originHost string) string {
 
 // NB! This is called from upstreams module threads!
 func (l *Listener) registerFailure(ctx context.Context, projectID string, serviceType string) {
+	const logFailureToSentry = false
+	const logFailureToMixpanel = false
+
 	// Don't count the same serviceType+projectID, sometimes there's a single project that just keeps failing
 	// e.g. because something external tries to hit it but the project has been hibernated or deleted
 	if _, loaded := l.failedProjects.LoadOrStore(serviceType+projectID, true); !loaded {
 		l.failureBucket.Add(1)
 
-		// Log failure (happens only once per projectID)
-		hub := sentry.GetHubFromContext(ctx)
-		l.logger.Warn("Upstream lookup failure registered", zap.String("projectID", projectID), zap.String("serviceType", serviceType), zap.Bool("alsoInSentry", hub != nil))
-		if hub != nil {
-			hub.WithScope(func(scope *sentry.Scope) {
-				scope.SetTag("projectID", projectID)
-				scope.SetLevel(sentry.LevelWarning)
-				hub.CaptureMessage("Upstream lookup failure registered")
-			})
+		//
+		// Now log the failure in misc channels (happens only once-ish per projectID within this process)
+		//
+
+		if logFailureToSentry {
+			hub := sentry.GetHubFromContext(ctx)
+			if hub != nil {
+				hub.WithScope(func(scope *sentry.Scope) {
+					scope.SetTag("projectID", projectID)
+					scope.SetLevel(sentry.LevelWarning)
+					hub.CaptureMessage("Upstream lookup failure registered")
+				})
+			}
 		}
+
+		// Send to mixpanel
+		if logFailureToMixpanel {
+			if l.mixpanelClient != nil {
+				var eventName string
+				switch serviceType {
+				case "devx":
+					eventName = "Proxy Devx Lookup Failed"
+				case "prodx":
+					eventName = "Proxy Prodx Lookup Failed"
+				}
+
+				if eventName != "" {
+					tracking.TrackSegmentEvent(
+						l.segmentClient,
+						l.logger,
+						projectID,
+						eventName,
+						map[string]any{
+							"projectID":   projectID,
+							"serviceType": serviceType,
+						})
+					tracking.TrackMixpanelEvent(
+						l.mixpanelClient,
+						l.logger,
+						projectID,
+						eventName,
+						map[string]any{
+							"projectID":   projectID,
+							"serviceType": serviceType,
+						})
+				}
+			}
+		}
+
+		l.logger.Warn(
+			"Upstream lookup failure registered",
+			zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+		)
 	}
 }
 
@@ -536,46 +551,6 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 func (l *Listener) resetFailures() {
 	l.failureBucket.Store(0)
 	l.failedProjects = new(sync.Map) // TODO: Wrap in mutex?
-	l.lastRestartTime.Store(time.Now().UnixMilli())
-}
-
-// Parameters for leaky bucket failure count tuning
-// fails if errors per second is higher than bucketLeakPerSecond
-// long enough that the bucket flows over the maxFailureBudget limit
-const (
-	maxFailureBudget           = 5
-	bucketLeakPerSecond        = 0.1
-	minimumTimeBetweenRestarts = 3 * time.Minute
-)
-
-// Currently unused? Revive or remove.
-func (l *Listener) checkFailures() error {
-	sinceLastCheck := time.Since(time.UnixMilli(l.lastCheckFailuresTime.Load()))
-	l.lastCheckFailuresTime.Store(time.Now().UnixMilli())
-
-	// Add some failure budget over time, this way we'll always tend to go back to the max,
-	// and need sustained errors over some time to actually call it failure
-	bucketLeak := int64(sinceLastCheck.Seconds() * bucketLeakPerSecond)
-
-	// Subtract leak but clamp to zero
-	bucket := l.failureBucket.Load()
-	bucket -= bucketLeak
-	if bucket < 0 {
-		bucket = 0
-	}
-	// Store the new budget, ignore if it has been touched between, this is not that accurate anyway
-	l.failureBucket.Store(bucket)
-
-	// Don't restart too rapidly
-	if time.Since(time.UnixMilli(l.lastRestartTime.Load())) < minimumTimeBetweenRestarts {
-		return nil
-	}
-
-	// Break circuit if we're out of failure budget
-	if bucket > maxFailureBudget {
-		return errors.Wrapf(ErrCircuitBroken, "Exceeded failure budget (%d > %d)", bucket, maxFailureBudget)
-	}
-	return nil
 }
 
 func (l *Listener) CountUpstreams() int {

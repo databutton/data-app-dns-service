@@ -1,19 +1,21 @@
 module github.com/databutton/data-app-dns-service
 
-go 1.26.0
+go 1.26.1
 
 require (
 	cloud.google.com/go/firestore v1.21.0
 	github.com/caddyserver/caddy/v2 v2.11.2
-	github.com/getsentry/sentry-go v0.43.0
+	github.com/getsentry/sentry-go v0.44.1
+	github.com/mixpanel/mixpanel-go v1.2.1
 	github.com/pkg/errors v0.9.1
+	github.com/segmentio/analytics-go v3.1.0+incompatible
 	go.uber.org/zap v1.27.1
 )
 
 require (
 	cel.dev/expr v0.25.1 // indirect
 	cloud.google.com/go v0.123.0 // indirect
-	cloud.google.com/go/auth v0.18.2 // indirect
+	cloud.google.com/go/auth v0.19.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/longrunning v0.8.0 // indirect
@@ -84,6 +86,7 @@ require (
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	github.com/segmentio/backo-go v1.1.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/shurcooL/sanitized_anchor_name v1.0.0 // indirect
 	github.com/slackhq/nebula v1.10.3 // indirect
@@ -100,6 +103,7 @@ require (
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/tscert v0.0.0-20251216020129-aea342f6d747 // indirect
 	github.com/urfave/cli v1.22.17 // indirect
+	github.com/xtgo/uuid v0.0.0-20140804021211-a0b114877d4c // indirect
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
@@ -115,7 +119,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/crypto/x509roots/fallback v0.0.0-20260320152806-81c6cb34a8fc // indirect
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20260323153451-8400f4a93807 // indirect
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
 	golang.org/x/mod v0.34.0 // indirect
 	golang.org/x/net v0.52.0 // indirect

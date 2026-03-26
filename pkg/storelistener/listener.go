@@ -484,6 +484,7 @@ func (l *Listener) ProjectIdForDomain(originHost string) string {
 func (l *Listener) registerFailure(ctx context.Context, projectID string, serviceType string) {
 	const logFailureToSentry = false
 	const logFailureToMixpanel = false
+	const logFailureToSegment = true
 
 	// Don't count the same serviceType+projectID, sometimes there's a single project that just keeps failing
 	// e.g. because something external tries to hit it but the project has been hibernated or deleted
@@ -493,6 +494,22 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 		//
 		// Now log the failure in misc channels (happens only once-ish per projectID within this process)
 		//
+
+		var eventName string
+		switch serviceType {
+		case "devx":
+			eventName = "Proxy Devx Lookup Failed"
+		case "prodx":
+			eventName = "Proxy Prodx Lookup Failed"
+		default:
+			eventName = "Proxy Lookup Failed with UNKNOWN SERVICE TYPE"
+		}
+
+		l.logger.Warn(
+			eventName,
+			zap.String("projectID", projectID),
+			zap.String("serviceType", serviceType),
+		)
 
 		if logFailureToSentry {
 			hub := sentry.GetHubFromContext(ctx)
@@ -505,45 +522,33 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 			}
 		}
 
-		// Send to mixpanel
-		if logFailureToMixpanel {
-			if l.mixpanelClient != nil {
-				var eventName string
-				switch serviceType {
-				case "devx":
-					eventName = "Proxy Devx Lookup Failed"
-				case "prodx":
-					eventName = "Proxy Prodx Lookup Failed"
-				}
-
-				if eventName != "" {
-					tracking.TrackSegmentEvent(
-						l.segmentClient,
-						l.logger,
-						projectID,
-						eventName,
-						map[string]any{
-							"projectID":   projectID,
-							"serviceType": serviceType,
-						})
-					tracking.TrackMixpanelEvent(
-						l.mixpanelClient,
-						l.logger,
-						projectID,
-						eventName,
-						map[string]any{
-							"projectID":   projectID,
-							"serviceType": serviceType,
-						})
-				}
+		if logFailureToSegment {
+			if l.segmentClient != nil {
+				tracking.TrackSegmentEvent(
+					l.segmentClient,
+					l.logger,
+					projectID,
+					eventName,
+					map[string]any{
+						"projectID":   projectID,
+						"serviceType": serviceType,
+					})
 			}
 		}
 
-		l.logger.Warn(
-			"Upstream lookup failure registered",
-			zap.String("projectID", projectID),
-			zap.String("serviceType", serviceType),
-		)
+		if logFailureToMixpanel {
+			if l.mixpanelClient != nil {
+				tracking.TrackMixpanelEvent(
+					l.mixpanelClient,
+					l.logger,
+					projectID,
+					eventName,
+					map[string]any{
+						"projectID":   projectID,
+						"serviceType": serviceType,
+					})
+			}
+		}
 	}
 }
 

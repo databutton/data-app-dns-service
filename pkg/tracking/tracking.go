@@ -35,9 +35,9 @@ func TrackSegmentEvent(segmentClient segment.Client, logger *zap.Logger, distinc
 		return
 	}
 
-	properties := segment.NewProperties()
-	for k, v := range props {
-		properties.Set(k, v)
+	var properties segment.Properties
+	if len(props) > 0 {
+		properties = segment.Properties(props)
 	}
 	err := segmentClient.Enqueue(segment.Track{
 		UserId:     distinctID,

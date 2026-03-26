@@ -498,11 +498,15 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 		var eventName string
 		switch serviceType {
 		case "devx":
-			eventName = "Proxy Devx Lookup Failed"
+			eventName = "Proxy Lookup Failed for Devx"
 		case "prodx":
-			eventName = "Proxy Prodx Lookup Failed"
+			eventName = "Proxy Lookup Failed for Prodx"
+		case "":
+			// Shouldn't happen
+			eventName = "Proxy Lookup Failed for BLANK SERVICE TYPE"
 		default:
-			eventName = "Proxy Lookup Failed with UNKNOWN SERVICE TYPE"
+			// Shouldn't happen
+			eventName = "Proxy Lookup Failed for " + serviceType
 		}
 
 		l.logger.Warn(
@@ -516,8 +520,9 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 			if hub != nil {
 				hub.WithScope(func(scope *sentry.Scope) {
 					scope.SetTag("projectID", projectID)
+					scope.SetTag("serviceType", serviceType)
 					scope.SetLevel(sentry.LevelWarning)
-					hub.CaptureMessage("Upstream lookup failure registered")
+					hub.CaptureMessage(eventName)
 				})
 			}
 		}

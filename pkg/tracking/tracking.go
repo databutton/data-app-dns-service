@@ -2,6 +2,7 @@ package tracking
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/mixpanel/mixpanel-go"
@@ -28,6 +29,22 @@ func TrackMixpanelEvent(mixpanelClient *mixpanel.ApiClient, logger *zap.Logger, 
 			zap.String("distinctId", distinctID),
 			zap.Error(err))
 	}
+}
+
+func InitSegment() segment.Client {
+	// Create a segment client
+	segmentWriteKey := os.Getenv("SEGMENT_WRITE_KEY")
+	if segmentWriteKey == "" {
+		return nil
+	}
+	segmentClient, err := segment.NewWithConfig(segmentWriteKey, segment.Config{
+		BatchSize: 100,
+		Interval:  5 * time.Second,
+	})
+	if err != nil {
+		return nil
+	}
+	return segmentClient
 }
 
 func TrackSegmentEvent(segmentClient segment.Client, logger *zap.Logger, distinctID, eventName string, props map[string]any) {

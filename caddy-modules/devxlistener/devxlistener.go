@@ -12,6 +12,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/databutton/data-app-dns-service/pkg/sentrytools"
 	"github.com/databutton/data-app-dns-service/pkg/storelistener"
+	"github.com/databutton/data-app-dns-service/pkg/tracking"
 	"github.com/getsentry/sentry-go"
 	"github.com/mixpanel/mixpanel-go"
 	segment "github.com/segmentio/analytics-go"
@@ -84,21 +85,9 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 	}
 
 	// Create a segment client
-	segmentWriteKey := os.Getenv("SEGMENT_WRITE_KEY")
-	if segmentWriteKey != "" {
-		var err error
-		m.segmentClient, err = segment.NewWithConfig(segmentWriteKey, segment.Config{
-			BatchSize: 100,
-			Interval:  5 * time.Second,
-		})
-		if err != nil {
-			m.logger.Error("devxlistener: Failed to create segment client", zap.Error(err))
-			m.segmentClient = nil
-		} else {
-			m.logger.Info("devxlistener: Created segment client")
-		}
-	} else {
-		m.logger.Warn("devxlistener: Missing segment key")
+	m.segmentClient = tracking.InitSegment()
+	if m.segmentClient == nil {
+		m.logger.Error("devxlistener: Failed to create segment client")
 	}
 
 	// Create and start listener background process

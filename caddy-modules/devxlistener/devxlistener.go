@@ -78,15 +78,27 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 	mixpanelApiKey := os.Getenv("MIXPANEL_API_KEY")
 	if mixpanelApiKey != "" {
 		m.mixpanelClient = mixpanel.NewApiClient(mixpanelApiKey)
+		m.logger.Info("devxlistener: Created mixpanel client")
+	} else {
+		m.logger.Warn("devxlistener: Missing mixpanel key")
 	}
 
 	// Create a segment client
 	segmentWriteKey := os.Getenv("SEGMENT_WRITE_KEY")
 	if segmentWriteKey != "" {
-		m.segmentClient, _ = segment.NewWithConfig(segmentWriteKey, segment.Config{
+		var err error
+		m.segmentClient, err = segment.NewWithConfig(segmentWriteKey, segment.Config{
 			BatchSize: 100,
 			Interval:  5 * time.Second,
 		})
+		if err != nil {
+			m.logger.Error("devxlistener: Failed to create segment client", zap.Error(err))
+			m.segmentClient = nil
+		} else {
+			m.logger.Info("devxlistener: Created segment client")
+		}
+	} else {
+		m.logger.Warn("devxlistener: Missing segment key")
 	}
 
 	// Create and start listener background process

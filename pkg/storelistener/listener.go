@@ -482,9 +482,9 @@ func (l *Listener) ProjectIdForDomain(originHost string) string {
 
 // NB! This is called from upstreams module threads!
 func (l *Listener) registerFailure(ctx context.Context, projectID string, serviceType string) {
-	const logFailureToSentry = false
-	const logFailureToMixpanel = false
-	const logFailureToSegment = true
+	logFailureToSentry := false
+	logFailureToMixpanel := l.mixpanelClient != nil
+	logFailureToSegment := l.segmentClient != nil
 
 	// Don't count the same serviceType+projectID, sometimes there's a single project that just keeps failing
 	// e.g. because something external tries to hit it but the project has been hibernated or deleted
@@ -513,6 +513,10 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 			eventName,
 			zap.String("projectID", projectID),
 			zap.String("serviceType", serviceType),
+			// Debugging not seeing event in segment
+			zap.Bool("inSentry", logFailureToSentry),
+			zap.Bool("inMixpanel", logFailureToMixpanel),
+			zap.Bool("inSegment", logFailureToSegment),
 		)
 
 		if logFailureToSentry {
@@ -528,31 +532,27 @@ func (l *Listener) registerFailure(ctx context.Context, projectID string, servic
 		}
 
 		if logFailureToSegment {
-			if l.segmentClient != nil {
-				tracking.TrackSegmentEvent(
-					l.segmentClient,
-					l.logger,
-					projectID,
-					eventName,
-					map[string]any{
-						"projectID":   projectID,
-						"serviceType": serviceType,
-					})
-			}
+			tracking.TrackSegmentEvent(
+				l.segmentClient,
+				l.logger,
+				projectID,
+				eventName,
+				map[string]any{
+					"projectID":   projectID,
+					"serviceType": serviceType,
+				})
 		}
 
 		if logFailureToMixpanel {
-			if l.mixpanelClient != nil {
-				tracking.TrackMixpanelEvent(
-					l.mixpanelClient,
-					l.logger,
-					projectID,
-					eventName,
-					map[string]any{
-						"projectID":   projectID,
-						"serviceType": serviceType,
-					})
-			}
+			tracking.TrackMixpanelEvent(
+				l.mixpanelClient,
+				l.logger,
+				projectID,
+				eventName,
+				map[string]any{
+					"projectID":   projectID,
+					"serviceType": serviceType,
+				})
 		}
 	}
 }

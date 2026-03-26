@@ -81,9 +81,9 @@ func (m *ListenerModule) Provision(ctx caddy.Context) error {
 	}
 
 	// Create a segment client
-	segmentApiKey := os.Getenv("SEGMENT_API_KEY")
-	if segmentApiKey != "" {
-		m.segmentClient, _ = segment.NewWithConfig(segmentApiKey, segment.Config{
+	segmentWriteKey := os.Getenv("SEGMENT_WRITE_KEY")
+	if segmentWriteKey != "" {
+		m.segmentClient, _ = segment.NewWithConfig(segmentWriteKey, segment.Config{
 			BatchSize: 100,
 			Interval:  5 * time.Second,
 		})

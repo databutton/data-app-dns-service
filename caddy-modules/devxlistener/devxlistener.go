@@ -160,7 +160,9 @@ func (m *ListenerModule) Validate() error {
 func (m *ListenerModule) Cleanup() error {
 	m.logger.Info("devxlistener: Cleanup")
 	m.cancel()
-	defer m.segmentClient.Close()
+	if m.segmentClient != nil {
+		defer m.segmentClient.Close()
+	}
 	// Flush buffered events before the program terminates.
 	sentry.Flush(2 * time.Second)
 	return nil
